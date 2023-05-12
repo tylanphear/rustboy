@@ -46,7 +46,7 @@ pub fn main_loop<H, E, R>(
 ) where
     H: FnMut(Event) -> ControlFlow<()>,
     E: FnMut(&imgui::Ui, imgui::TextureId),
-    R: FnMut(&mut [u8]),
+    R: FnMut(&mut crate::io::lcd::ScreenBuffer),
 {
     let sdl = sdl2::init().expect("couldn't initialize SDL?");
     let video = sdl.video().expect("couldn't get SDL video subsystem?");
@@ -104,7 +104,7 @@ pub fn main_loop<H, E, R>(
         renderer.texture_map_mut().register(id).unwrap()
     };
 
-    let mut raw_frame_pixels = vec![0; 160 * 144];
+    let mut raw_frame_pixels = Box::new([0u8; 160 * 144]);
     let mut gl_frame_pixels = vec![0; 160 * 144 * 3];
     'main: loop {
         for event in event_pump.poll_iter() {
@@ -121,11 +121,11 @@ pub fn main_loop<H, E, R>(
         let ui = imgui.new_frame();
         draw_ui(ui, framebuffer_tex_id);
 
-        render_frame(&mut raw_frame_pixels);
+        render_frame(raw_frame_pixels.as_mut());
         for (idx, raw_pixel) in raw_frame_pixels.iter().enumerate() {
             let gl_pixel = match raw_pixel {
                 //     R     G     B
-                0 => [0xFF, 0xFF, 0xFF], // WHITE
+                0 => [0xFC, 0xFC, 0xFC], // WHITE
                 1 => [0xD3, 0xD3, 0xD3], // LIGHT GRAY
                 2 => [0x5A, 0x5A, 0x5A], // DARK GRAY
                 3 => [0x00, 0x00, 0x00], // BLACK
@@ -138,8 +138,10 @@ pub fn main_loop<H, E, R>(
         unsafe {
             use glow::*;
             let gl = renderer.gl_context();
-            let frame =
-                renderer.texture_map().gl_texture(framebuffer_tex_id).unwrap();
+            let frame = renderer
+                .texture_map()
+                .gl_texture(framebuffer_tex_id)
+                .unwrap();
             gl.bind_texture(TEXTURE_2D, Some(frame));
             gl.tex_image_2d(
                 TEXTURE_2D,

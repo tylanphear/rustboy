@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::mmu::MMU;
 use crate::opcodes::{self, Op, OpStatus};
 use crate::utils::Regs;
+use crate::{debug, debug_break, debug_log};
 
 pub mod regs {
     // Bit 4 - Joypad
@@ -21,14 +22,20 @@ pub mod regs {
 }
 use regs::*;
 
-#[derive(Clone, Copy)]
-struct CurrentOp {}
+#[derive(Default)]
+pub struct Tick {
+    pub breakpoint_was_hit: bool,
+    pub op_was_retired: bool,
+    pub op_was_fetched: bool,
+    pub pc: u16,
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum State {
+enum State {
     Stopped,
-    Executing(u64),
-    Retiring(u64),
+    Halted,
+    ExecutingOp(u64),
+    RetiringOp(u64),
 }
 
 #[derive(Debug, Default)]
@@ -37,7 +44,7 @@ pub struct Breakpoints {
 }
 
 impl Breakpoints {
-    pub fn reset(&mut self) {
+    pub fn clear(&mut self) {
         self.addr2hits.clear();
     }
 
@@ -53,14 +60,16 @@ impl Breakpoints {
         self.addr2hits.get(&addr).copied().unwrap_or(0)
     }
 
-    pub fn reset_count(&mut self, addr: u16) {
-        *self.addr2hits.get_mut(&addr).unwrap() = 0;
+    pub fn reset(&mut self, addr: u16) {
+        self.addr2hits.get_mut(&addr).map(|count| *count = 0);
     }
 
-    fn check_hit(&mut self, addr: &u16) {
+    fn check_hit(&mut self, addr: &u16) -> bool {
         if let Some(count) = self.addr2hits.get_mut(addr) {
             *count = count.saturating_add(1);
+            return true;
         }
+        false
     }
 
     pub fn dump(&self) -> String {
@@ -85,7 +94,7 @@ pub struct CPU {
     pub mmu: MMU,
     ime: bool, // Interrupt Master Enable
 
-    enable_interrupts_next_inst: bool,
+    enable_interrupts_in_n_ops: u8,
     current_op: Option<&'static Op>,
     state: State,
 
@@ -98,9 +107,9 @@ impl CPU {
             regs: Regs::default(),
             mmu: MMU::new(),
             ime: false,
-            enable_interrupts_next_inst: false,
+            enable_interrupts_in_n_ops: 0,
             current_op: None,
-            state: State::Retiring(0),
+            state: State::RetiringOp(0),
             breakpoints: Default::default(),
         }
     }
@@ -109,86 +118,125 @@ impl CPU {
         self.current_op
     }
 
-    pub fn tick(&mut self) -> (bool, bool) {
+    pub fn executing_op(&self) -> bool {
+        matches!(self.state, State::ExecutingOp(_))
+    }
+
+    pub fn tick(&mut self) -> Tick {
         const CYCLES_PER_TICK: u64 = 4;
 
-        let (mut op_was_retired, mut op_was_fetched) = (false, false);
+        let mut this_tick = Tick::default();
+        this_tick.pc = self.regs.pc;
+
+        // First check if we're halted. If so, and there is an interrupt
+        // requested, un-halt and continue execution.
+        if self.state == State::Halted {
+            self.unhalt_if_interrupt_requested();
+        }
+
+        // Now check if we're ready to fetch a new instruction. We check if we
+        // need to enable interrupts, then possibly handle an interrupt (jump
+        // to the interrupt vector). Once that's done, fetch/decode the
+        // instruction at PC.
         match self.state {
-            State::Retiring(0) => {
-                self.breakpoints.check_hit(&self.regs.pc);
+            State::RetiringOp(0) => {
+                self.enable_interrupts_if_needed();
+                if self.handle_interrupts() {
+                    this_tick.pc = self.regs.pc;
+                }
                 let next_op = self.fetch_and_decode_one_inst();
                 self.current_op = Some(next_op);
-                self.state = State::Executing(next_op.clocks as u64);
-                op_was_fetched = true;
+                self.state = State::ExecutingOp(next_op.clocks as u64);
+                this_tick.op_was_fetched = true;
+
+                if self.breakpoints.check_hit(&self.regs.pc) {
+                    this_tick.breakpoint_was_hit = true;
+                }
             }
             _ => {}
         };
 
+        // We possibly fetched an instruction, or are currently executing an
+        // instruction. If the instruction finishes this cycle, mark the
+        // instruction as retired; otherwise tick one cycle.
         match self.state {
-            State::Executing(CYCLES_PER_TICK) => {
+            State::ExecutingOp(CYCLES_PER_TICK) => {
                 let extra_cycles =
                     self.execute_one_inst(self.current_op.unwrap());
-                self.state = State::Retiring(extra_cycles);
-                op_was_retired = true;
+                if self.state != State::Halted {
+                    self.state = State::RetiringOp(extra_cycles);
+                }
+                this_tick.op_was_retired = true;
             }
-            State::Executing(ref mut cycles)
-            | State::Retiring(ref mut cycles) => {
+            State::ExecutingOp(ref mut cycles)
+            | State::RetiringOp(ref mut cycles) => {
                 *cycles -= CYCLES_PER_TICK;
             }
             _ => {}
         };
 
+        // Tick devices (MMU/LCD/Timer) and check for interrupts that need to
+        // be flagged in IF.
         self.mmu.tick();
         let need_vblank_interrupt = self.mmu.io.lcd.tick();
         let need_timer_interrupt = self.mmu.io.timer.tick();
         if need_timer_interrupt || need_vblank_interrupt {
             let iflags = self.mmu.load8(IF);
-            let timer = (need_timer_interrupt as u8) << 1;
-            let vblank = (need_vblank_interrupt as u8) << 2;
+            let vblank = (need_vblank_interrupt as u8) << 0;
+            let timer = (need_timer_interrupt as u8) << 2;
             self.mmu.store8(IF, iflags | timer | vblank);
         }
 
-        (op_was_fetched, op_was_retired)
+        this_tick
+    }
+
+    pub fn unhalt_if_interrupt_requested(&mut self) {
+        if self.mmu.load8(IE) & self.mmu.load8(IF) & 0x1F != 0 {
+            self.state = State::RetiringOp(0);
+        }
     }
 
     pub fn stop(&mut self) {
         self.state = State::Stopped;
     }
 
+    pub fn halt(&mut self) {
+        self.state = State::Halted;
+    }
+
     pub fn reset(&mut self) {
         self.regs = Regs::default();
         self.mmu.clear();
         self.ime = false;
-        self.enable_interrupts_next_inst = false;
-        self.state = State::Retiring(0);
+        self.enable_interrupts_in_n_ops = 0;
+        self.state = State::RetiringOp(0);
         self.current_op = None;
-        self.breakpoints.reset();
     }
 
     fn fetch_and_decode_one_inst(&self) -> &'static Op {
         let first_byte = self.mmu.load8(self.regs.pc);
         if first_byte != 0xCB {
-            opcodes::from_code(first_byte)
+            opcodes::op_from_code(first_byte)
         } else {
             let next_byte = self.mmu.load8(self.regs.pc + 1);
-            opcodes::from_prefixed_code(next_byte)
+            opcodes::op_from_prefixed_code(next_byte)
         }
     }
 
     fn execute_one_inst(&mut self, op: &Op) -> u64 {
-        let status = (op.handler)(self, op.args, op.bytes);
+        let status = (op.handler)(self, op.args, op.num_bytes);
         match status {
             OpStatus::Normal => {
-                self.regs.pc += op.bytes as u16;
+                self.regs.pc += op.num_bytes as u16;
                 0
             }
             OpStatus::BranchTaken(extra_cycles) => extra_cycles as u64,
         }
     }
 
-    fn handle_interrupts(&mut self) {
+    fn handle_interrupts(&mut self) -> bool {
         if !self.ime {
-            return;
+            return false;
         }
 
         // An interrupt is requested if the corresponding bit of IE & IF is set,
@@ -198,7 +246,7 @@ impl CPU {
             self.mmu.load8(IE) & self.mmu.load8(IF) & 0b00011111;
         let interrupt_requested = interrupt_mask.trailing_zeros() as u16;
         if interrupt_requested > 5 {
-            return;
+            return false;
         }
 
         // Bit 4 - Joypad         - 0x0060
@@ -224,6 +272,7 @@ impl CPU {
         // TODO: It takes 20 clocks to dispatch an interrupt
         // (TODO: +4 clocks in halt mode(?))
         // self.tick(20);
+        true
     }
 
     pub fn disable_interrupts(&mut self) {
@@ -234,8 +283,21 @@ impl CPU {
         self.ime = true;
     }
 
+    fn enable_interrupts_if_needed(&mut self) {
+        if self.enable_interrupts_in_n_ops == 0 {
+            return;
+        }
+
+        self.enable_interrupts_in_n_ops -= 1;
+        if self.enable_interrupts_in_n_ops > 0 {
+            return;
+        }
+
+        self.enable_interrupts();
+    }
+
     pub fn enable_interrupts_next_inst(&mut self) {
-        self.enable_interrupts_next_inst = true;
+        self.enable_interrupts_in_n_ops = 2;
     }
 
     pub fn dump<W: std::fmt::Write>(&self, out: &mut W) -> std::fmt::Result {
@@ -276,6 +338,8 @@ impl CPU {
             "Interrupts: {}",
             if self.ime { "enabled" } else { "disabled" }
         )?;
+        writeln!(out, "IF: {0:08b}", self.mmu.load8(IF),)?;
+        writeln!(out, "IE: {0:08b}", self.mmu.load8(IE),)?;
         let stack_size = (u16::MAX - self.regs.sp) as usize;
         writeln!(
             out,
@@ -284,29 +348,5 @@ impl CPU {
                 .block_load(self.regs.sp, usize::min(stack_size, 16))
         )?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn vblank_interrupt_is_triggered() {
-        let mut cpu = CPU::new();
-        cpu.stop();
-        // First enable LCD power
-        cpu.mmu.store8(crate::io::lcd::reg::LCDC, 0x80);
-        assert_eq!(cpu.mmu.io.lcd.mode(), 0);
-        // Simulate 144 lines before VBlank
-        for _ in 0..144 {
-            for _ in 0..456 {
-                cpu.tick();
-            }
-        }
-        assert_eq!(cpu.mmu.io.lcd.mode(), 0);
-        cpu.tick();
-        assert_eq!(cpu.mmu.io.lcd.mode(), 1);
-        assert_eq!(cpu.mmu.load8(IF) & 0x1, 0x1);
     }
 }

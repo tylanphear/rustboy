@@ -1,3 +1,5 @@
+use crate::debug_break;
+
 pub mod regs {
     pub const DIV: u16 = 0xFF04;
     pub const TIMA: u16 = 0xFF05;
@@ -23,12 +25,11 @@ impl Timer {
 
         let mut need_interrupt = false;
         if self.enabled() {
-            if self.clock & (1 << self.clock_bit()) != 0 {
-                if self.tima == u8::MAX - 1 {
+            if self.clock % self.clock_rate() == 0 {
+                self.tima += 1;
+                if self.tima == u8::MAX {
                     need_interrupt = true;
                     self.tima = self.tma;
-                } else {
-                    self.tima = self.tima + 1;
                 }
             }
         }
@@ -59,23 +60,33 @@ impl Timer {
         self.tac & 0x1 != 0
     }
 
-    fn clock_bit(&self) -> u16 {
+    fn clock_rate(&self) -> u16 {
         match self.tac & 0x3 {
-            0b00 => 9, // 1024 clocks   4096 Hz
-            0b01 => 7, //   16 clocks 262144 Hz
-            0b10 => 5, //   64 clocks  65536 Hz
-            0b11 => 3, //  256 clocks  16386 Hz
+            0b00 => 1024, // clocks   4096 Hz
+            0b01 => 16,   // clocks 262144 Hz
+            0b10 => 64,   // clocks  65536 Hz
+            0b11 => 256,  // clocks  16386 Hz
             _ => unreachable!(),
         }
     }
 
     pub fn dump<W: std::fmt::Write>(&self, out: &mut W) -> std::fmt::Result {
-        writeln!(out, "DIV : {:02X}", self.load(regs::DIV))?;
-        writeln!(out, "TIMA: {:02X}", self.load(regs::TIMA))?;
-        writeln!(out, "TMA : {:02X}", self.load(regs::TMA))?;
-        writeln!(out, "TAC : {:03b}", self.load(regs::TAC))?;
+        writeln!(
+            out,
+            "DIV :  {:02X} ({:04X})",
+            self.clock.to_le_bytes()[1],
+            regs::DIV
+        )?;
+        writeln!(out, "TIMA:  {:02X} ({:04X})", self.tima, regs::TIMA)?;
+        writeln!(out, "TMA :  {:02X} ({:04X})", self.tma, regs::TMA)?;
+        writeln!(out, "TAC : {:03b} ({:04X})", self.tac, regs::TAC)?;
         writeln!(out)?;
-        writeln!(out, "CLOCK: {:04X}", self.clock)?;
+        writeln!(
+            out,
+            "CLOCK: {:04X} (rate: {})",
+            self.clock,
+            self.clock_rate()
+        )?;
         Ok(())
     }
 }

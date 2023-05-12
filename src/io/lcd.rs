@@ -1,5 +1,5 @@
-use crate::debug_log;
 use crate::mmu::Mem;
+use crate::{debug_break, debug_log};
 
 // LCD display is 160x144 pixels
 const SCREEN_WIDTH: usize = 160;
@@ -16,6 +16,10 @@ const NUM_TILES_IN_Y: usize = 32;
 const BG_WIDTH: usize = NUM_TILES_IN_X * TILE_WIDTH_IN_PIXELS;
 const BG_HEIGHT: usize = NUM_TILES_IN_Y * TILE_HEIGHT_IN_PIXELS;
 const TILE_MAP_SIZE: usize = NUM_TILES_IN_X * NUM_TILES_IN_Y;
+const TILE_MAP_1: u16 = 0x9800;
+const TILE_MAP_2: u16 = 0x9C00;
+
+pub type ScreenBuffer = [u8; SCREEN_WIDTH * SCREEN_HEIGHT];
 
 // 4 gray shades:
 pub mod colors {
@@ -51,10 +55,16 @@ pub mod reg {
     //         3: Tranferring data to LCD
     pub const STAT: u16 = 0xFF41;
 
+    // Window Scroll X
     pub const SCY : u16 = 0xFF42;
+    // Window Scroll Y
     pub const SCX : u16 = 0xFF43;
+
+    // Current scanline
     pub const LY  : u16 = 0xFF44;
     pub const LYC : u16 = 0xFF45;
+
+    // Address to request DMA to OAM
     pub const DMA : u16 = 0xFF46;
 
     // Bit 7-6 - Shade for Color 3
@@ -159,6 +169,7 @@ impl LCDController {
             reg::WX
         )?;
         writeln!(out, "BG TILE MAP: {0:04X}", self.bg_tile_map_addr(),)?;
+        writeln!(out, "WI TILE MAP: {0:04X}", self.window_tile_map_addr(),)?;
         Ok(())
     }
 
@@ -180,7 +191,7 @@ impl LCDController {
     }
 
     pub fn tick(&mut self) -> bool {
-        if !self.is_powered_on() {
+        if !self.lcd_display_enabled() {
             return false;
         }
 
@@ -236,7 +247,8 @@ impl LCDController {
 
     pub fn dma_prepare_transfer(&self, mmu: &MMU) -> Vec<u8> {
         let base = self.read_reg(reg::DMA);
-        let addr = (base as u16) * 0x100;
+        let addr = (base as u16) << 8;
+        debug_break!();
         debug_log!("preparing for DMA transfer from {addr:04X}");
         mmu.block_load(addr, OAM_SIZE).to_vec()
     }
@@ -247,16 +259,24 @@ impl LCDController {
         self.oam.copy_from_slice(&data);
     }
 
-    fn is_powered_on(&self) -> bool {
+    fn lcd_display_enabled(&self) -> bool {
         utils::bit_set(self.read_reg(reg::LCDC), 7)
     }
 
+    fn window_enabled(&self) -> bool {
+        utils::bit_set(self.read_reg(reg::LCDC), 5)
+    }
+
+    fn bg_and_window_enabled(&self) -> bool {
+        utils::bit_set(self.read_reg(reg::LCDC), 0)
+    }
+
     fn oam_is_inaccessible(&self) -> bool {
-        self.is_powered_on() && (self.mode() == 2 || self.mode() == 3)
+        self.lcd_display_enabled() && (self.mode() == 2 || self.mode() == 3)
     }
 
     fn vram_is_inaccessible(&self) -> bool {
-        self.is_powered_on() && self.mode() == 3
+        self.lcd_display_enabled() && self.mode() == 3
     }
 
     pub fn load(&self, address: u16) -> u8 {
@@ -276,9 +296,9 @@ impl LCDController {
                 self.write_reg(reg::STAT, val & 0x80);
             }
             reg::LCDC => {
-                let was_powered_on = self.is_powered_on();
+                let was_powered_on = self.lcd_display_enabled();
                 self.write_reg(reg::LCDC, val);
-                if !was_powered_on && self.is_powered_on() {
+                if !was_powered_on && self.lcd_display_enabled() {
                     self.write_reg(reg::LY, 0);
                 }
             }
@@ -311,7 +331,7 @@ impl LCDController {
         }
     }
 
-    pub fn clear(screen: &mut [u8], color: u8) {
+    pub fn clear(screen: &mut ScreenBuffer, color: u8) {
         screen.fill(color);
     }
 
@@ -330,11 +350,9 @@ impl LCDController {
     }
 
     fn bg_tile_map_addr(&self) -> u16 {
-        const BG_TILE_MAP_1: u16 = 0x9800;
-        const BG_TILE_MAP_2: u16 = 0x9C00;
         match utils::bit_set(self.read_reg(reg::LCDC), 3) {
-            false => BG_TILE_MAP_1,
-            true => BG_TILE_MAP_2,
+            false => TILE_MAP_1,
+            true => TILE_MAP_2,
         }
     }
 
@@ -343,9 +361,21 @@ impl LCDController {
             .slice(self.bg_tile_map_addr() - VRAM_START, TILE_MAP_SIZE)
     }
 
-    pub fn draw(&self, screen: &mut [u8]) {
-        if !self.is_powered_on() {
-            Self::clear(screen, colors::BLACK);
+    fn window_tile_map_addr(&self) -> u16 {
+        match utils::bit_set(self.read_reg(reg::LCDC), 6) {
+            false => TILE_MAP_1,
+            true => TILE_MAP_2,
+        }
+    }
+
+    fn window_tile_map(&self) -> &[u8] {
+        self.vram
+            .slice(self.window_tile_map_addr() - VRAM_START, TILE_MAP_SIZE)
+    }
+
+    pub fn draw(&self, screen: &mut ScreenBuffer) {
+        if !self.lcd_display_enabled() {
+            Self::clear(screen, colors::WHITE);
             return;
         }
 
@@ -360,27 +390,49 @@ impl LCDController {
             (self.read_reg(reg::BGP) & 0xC0) >> 6, // COLOR NUM 3 (BLACK)
         ];
 
-        // Bit 0 - BG Enabled
-        if !utils::bit_set(self.read_reg(reg::LCDC), 0) {
+        if !self.bg_and_window_enabled() {
             Self::clear(screen, bg_palette[0]);
             return;
         }
 
-        let nth_tile = match utils::bit_set(self.read_reg(reg::LCDC), 4) {
-            false => Self::tile_at_signed_addr,
-            true => Self::tile_at_unsigned_addr,
-        };
-
-        let (screen_x, screen_y) =
-            (self.read_reg(reg::SCX), self.read_reg(reg::SCY));
+        let get_tile = self.tile_data_fn();
 
         // Iterate over screen pixels and draw background
-        let bg_tile_map = self.bg_tile_map();
+        self.draw_tiles_to_screen(
+            self.read_reg(reg::SCX),
+            self.read_reg(reg::SCY),
+            self.bg_tile_map(),
+            get_tile,
+            bg_palette,
+            screen,
+        );
+
+        if self.window_enabled() {
+            self.draw_tiles_to_screen(
+                0,
+                0,
+                self.window_tile_map(),
+                get_tile,
+                bg_palette,
+                screen,
+            );
+        }
+    }
+
+    fn draw_tiles_to_screen(
+        &self,
+        off_x: u8,
+        off_y: u8,
+        tile_map: &[u8],
+        get_tile: fn(&LCDController, u8) -> &[u8],
+        palette: [u8; 4],
+        screen: &mut ScreenBuffer,
+    ) {
         for y in 0..SCREEN_HEIGHT {
             for x in 0..SCREEN_WIDTH {
                 let (bg_x, bg_y) = (
-                    utils::wrapping_add(x, screen_x as usize, BG_WIDTH),
-                    utils::wrapping_add(y, screen_y as usize, BG_HEIGHT),
+                    utils::wrapping_add(x, off_x as usize, BG_WIDTH),
+                    utils::wrapping_add(y, off_y as usize, BG_HEIGHT),
                 );
 
                 // First locate which tile this pixel is in. Imagining a 20x18
@@ -392,8 +444,8 @@ impl LCDController {
                     (bg_x / TILE_WIDTH_IN_PIXELS, bg_y / TILE_HEIGHT_IN_PIXELS);
                 let tile_offset = tile_y * NUM_TILES_IN_X + tile_x;
 
-                let tile_num = bg_tile_map[tile_offset];
-                let tile = nth_tile(self, tile_num as u8);
+                let tile_num = tile_map[tile_offset];
+                let tile = get_tile(self, tile_num as u8);
 
                 // Next, determine our sub-pixel location (within the tile), by
                 // re-orienting our point's origin to the starting (x,y) of our
@@ -406,9 +458,16 @@ impl LCDController {
                 // that to according to the current palette, and write it to
                 // the screen buffer.
                 let cnum = pixel_color_num_in_tile(tile, subpixel);
-                let color = bg_palette[cnum as usize];
+                let color = palette[cnum as usize];
                 screen[y * SCREEN_WIDTH + x] = color;
             }
+        }
+    }
+
+    fn tile_data_fn(&self) -> fn(&Self, u8) -> &[u8] {
+        match utils::bit_set(self.read_reg(reg::LCDC), 4) {
+            false => Self::tile_at_signed_addr,
+            true => Self::tile_at_unsigned_addr,
         }
     }
 }
@@ -501,5 +560,24 @@ mod tests {
                 2, 3, 3, 3, 3, 3, 3, 2,
             ]
         );
+    }
+
+    #[test]
+    fn vblank_interrupt_is_triggered() {
+        let mut cpu = crate::CPU::new();
+        cpu.stop();
+        // First enable LCD power
+        cpu.mmu.store8(crate::io::lcd::reg::LCDC, 0x80);
+        assert_eq!(cpu.mmu.io.lcd.mode(), 0);
+        // Simulate 144 lines before VBlank
+        for _ in 0..144 {
+            for _ in 0..CLOCKS_PER_SCANLINE {
+                cpu.tick();
+            }
+        }
+        assert_eq!(cpu.mmu.io.lcd.mode(), 0);
+        cpu.tick();
+        assert_eq!(cpu.mmu.io.lcd.mode(), 1);
+        assert_eq!(cpu.mmu.load8(crate::cpu::regs::IF) & 0x1, 0x1);
     }
 }

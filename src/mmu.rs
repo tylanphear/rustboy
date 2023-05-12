@@ -40,7 +40,6 @@ pub struct MMU {
     cartridge: Option<Cartridge>,
     bios_enabled: bool,
     clocks_til_oam_dma: u64,
-    watchpoints: RefCell<HashMap<u16, u64>>,
 }
 
 impl MMU {
@@ -57,7 +56,6 @@ impl MMU {
             iflags: 0b11100000,
             ie: 0,
             clocks_til_oam_dma: 0,
-            watchpoints: Default::default(),
         }
     }
 
@@ -96,9 +94,7 @@ impl MMU {
     }
 
     pub fn load8(&self, address: u16) -> u8 {
-        //self.watchpoints.borrow_mut().get_mut(&address).map(|p| {
-        //    *p += 1;
-        //});
+        // Only HRAM is accessible during OAM DMA
         if self.clocks_til_oam_dma > 0 {
             return match address {
                 0xFF80..=0xFFFE => self.hram[address - 0xFF80],
@@ -108,10 +104,8 @@ impl MMU {
         match address {
             // | BIOS   | Bootstrap program (when enabled)
             0x0000..=0x00FF if self.bios_enabled => self.bios[address - 0x0000],
-            // | ROM0   | Non-switchable ROM
-            0x0000..=0x3FFF |
-            // | ROMX   | Switchable ROM
-            0x4000..=0x7FFF => self.cartridge.as_ref().unwrap().load(address),
+            // | ROM0   | Cartridge ROM
+            0x0000..=0x7FFF => self.cartridge.as_ref().unwrap().load(address),
             // | VRAM   | Video RAM
             0x8000..=0x9FFF => self.io.lcd.load(address),
             // | SRAM   | External RAM, persistent
@@ -173,11 +167,9 @@ impl MMU {
             // | UNUSED | Ignored/empty (mostly)
             0xFEA0..=0xFEFF => return,
             cpu::regs::IF => self.iflags = val | 0b11100000,
-            regs::BIOS_ROM_DISABLE => if self.bios_enabled {
-                if val == 0x1 {
-                    self.bios_enabled = false;
-                }
-            },
+            regs::BIOS_ROM_DISABLE => if val == 0x1 {
+                self.bios_enabled = false;
+            }
             lcd::reg::DMA => {
                 assert_eq!(self.clocks_til_oam_dma, 0);
                 self.clocks_til_oam_dma = 140;

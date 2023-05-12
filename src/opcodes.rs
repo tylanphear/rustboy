@@ -1,6 +1,7 @@
 #![deny(unreachable_patterns)]
 
 use crate::cpu::CPU;
+use crate::debug_break;
 use crate::utils;
 
 pub type OpHandler = fn(&mut CPU, [u8; 2], u8) -> OpStatus;
@@ -9,8 +10,9 @@ pub enum OpStatus {
     BranchTaken(u8),
 }
 
+#[derive(Clone, Copy)]
 pub struct Op {
-    pub bytes: u8,
+    pub num_bytes: u8,
     pub clocks: u8,
     pub handler: OpHandler,
     pub args: [u8; 2],
@@ -332,20 +334,20 @@ fn writeback16(cpu: &mut CPU, reg16: u8, val: u16) {
 }
 
 macro_rules! op {
-    ($repr:literal, $bytes:literal, $clocks:literal, $handler:ident, $arg_1:expr, $arg_2:expr) => {
+    ($repr:literal, $num_bytes:literal, $clocks:literal, $handler:ident, $arg_1:expr, $arg_2:expr) => {
         Op {
-            bytes: $bytes,
+            num_bytes: $num_bytes,
             clocks: $clocks,
             handler: $handler,
             args: [$arg_1, $arg_2],
             repr: $repr,
         }
     };
-    ($repr:literal, $bytes:literal, $clocks:literal, $handler:ident, $arg:expr) => {
-        op!($repr, $bytes, $clocks, $handler, $arg, 0)
+    ($repr:literal, $num_bytes:literal, $clocks:literal, $handler:ident, $arg:expr) => {
+        op!($repr, $num_bytes, $clocks, $handler, $arg, 0)
     };
-    ($repr:literal, $bytes:literal, $clocks:literal, $handler:ident) => {
-        op!($repr, $bytes, $clocks, $handler, 0, 0)
+    ($repr:literal, $num_bytes:literal, $clocks:literal, $handler:ident) => {
+        op!($repr, $num_bytes, $clocks, $handler, 0, 0)
     };
     ($todo_text:literal) => {
         op!($todo_text, 1, 1, trap, TODO, 0)
@@ -1358,7 +1360,7 @@ fn trap(cpu: &mut CPU, args: [u8; 2], op_bytes: u8) -> OpStatus {
 fn misc(cpu: &mut CPU, args: [u8; 2], _: u8) -> OpStatus {
     let [action, _] = args;
     match action {
-        misc::HALT => todo!(),
+        misc::HALT => cpu.halt(),
         misc::EI => cpu.enable_interrupts_next_inst(),
         misc::DI => cpu.disable_interrupts(),
         misc::STOP => cpu.stop(),
@@ -1368,13 +1370,25 @@ fn misc(cpu: &mut CPU, args: [u8; 2], _: u8) -> OpStatus {
 }
 
 #[inline]
-pub fn from_code(code: u8) -> &'static Op {
+pub fn op_from_code(code: u8) -> &'static Op {
     &OPS[code as usize]
 }
 
 #[inline]
-pub fn from_prefixed_code(code: u8) -> &'static Op {
+pub fn op_from_prefixed_code(code: u8) -> &'static Op {
     &PREFIXED_OPS[code as usize]
+}
+
+pub fn is_unconditional_jump(code: u8) -> bool {
+    match code {
+        | 0x18 // JR r8
+        | 0xC3 // JP a16
+        | 0xC9 // RET
+        | 0xD9 // RETI
+        | 0xE9 // JP HL
+        => true,
+        _ => false,
+    }
 }
 
 #[cfg(test)]

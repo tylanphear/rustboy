@@ -117,3 +117,40 @@ impl Regs {
         self.af[0] = crate::utils::set_bit(self.af[0], 7, val);
     }
 }
+
+#[derive(Debug)]
+pub struct BoundedLog<const MAX_SIZE: usize, const MAX_LINES: usize> {
+    buffer: String,
+}
+
+impl<const S: usize, const L: usize> Default for BoundedLog<S, L> {
+    fn default() -> Self {
+        Self {
+            buffer: String::with_capacity(S),
+        }
+    }
+}
+
+impl<const S: usize, const L: usize> BoundedLog<S, L> {
+    pub fn as_str(&self) -> &str {
+        &self.buffer
+    }
+
+    pub fn clear(&mut self) {
+        self.buffer.clear();
+    }
+
+    pub fn push(&mut self, s: &str) {
+        if self.buffer.len() + s.len() > S {
+            // Drain off the first L lines when the buffer gets sufficiently full
+            let idx = self
+                .buffer
+                .char_indices()
+                .filter_map(|(idx, c)| (c == '\n').then_some(idx))
+                .nth(L)
+                .unwrap_or(0);
+            self.buffer.drain(0..idx);
+        }
+        self.buffer.push_str(s);
+    }
+}
