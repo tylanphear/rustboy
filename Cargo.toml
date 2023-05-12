@@ -12,3 +12,7 @@ imgui-sdl2-support = "0.11.0"
 glow = "0.12.0"
 sdl2 = "0.34.5"
 once_cell = "1.17"
+parking_lot = "0.12.1"
+
+[profile.release]
+debug = true

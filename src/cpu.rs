@@ -141,7 +141,8 @@ impl CPU {
         match self.state {
             State::RetiringOp(0) => {
                 self.enable_interrupts_if_needed();
-                if self.handle_interrupts() {
+                let interrupt_was_dispatched = self.handle_interrupts();
+                if interrupt_was_dispatched {
                     this_tick.pc = self.regs.pc;
                 }
                 let next_op = self.fetch_and_decode_one_inst();
@@ -181,7 +182,7 @@ impl CPU {
         let need_vblank_interrupt = self.mmu.io.lcd.tick();
         let need_timer_interrupt = self.mmu.io.timer.tick();
         if need_timer_interrupt || need_vblank_interrupt {
-            let iflags = self.mmu.load8(IF);
+            let iflags = self.mmu.load8_unchecked(IF);
             let vblank = (need_vblank_interrupt as u8) << 0;
             let timer = (need_timer_interrupt as u8) << 2;
             self.mmu.store8(IF, iflags | timer | vblank);
@@ -191,7 +192,9 @@ impl CPU {
     }
 
     pub fn unhalt_if_interrupt_requested(&mut self) {
-        if self.mmu.load8(IE) & self.mmu.load8(IF) & 0x1F != 0 {
+        if self.mmu.load8_unchecked(IE) & self.mmu.load8_unchecked(IF) & 0x1F
+            != 0
+        {
             self.state = State::RetiringOp(0);
         }
     }
@@ -235,15 +238,12 @@ impl CPU {
     }
 
     fn handle_interrupts(&mut self) -> bool {
-        if !self.ime {
-            return false;
-        }
-
         // An interrupt is requested if the corresponding bit of IE & IF is set,
         // with the bottom-most bit taking priority in cases where more than one
         // bit is set.
-        let interrupt_mask =
-            self.mmu.load8(IE) & self.mmu.load8(IF) & 0b00011111;
+        let interrupt_mask = self.mmu.load8_unchecked(IE)
+            & self.mmu.load8_unchecked(IF)
+            & 0b00011111;
         let interrupt_requested = interrupt_mask.trailing_zeros() as u16;
         if interrupt_requested > 5 {
             return false;
@@ -338,8 +338,8 @@ impl CPU {
             "Interrupts: {}",
             if self.ime { "enabled" } else { "disabled" }
         )?;
-        writeln!(out, "IF: {0:08b}", self.mmu.load8(IF),)?;
-        writeln!(out, "IE: {0:08b}", self.mmu.load8(IE),)?;
+        writeln!(out, "IF: {0:08b}", self.mmu.load8_unchecked(IF))?;
+        writeln!(out, "IE: {0:08b}", self.mmu.load8_unchecked(IE))?;
         let stack_size = (u16::MAX - self.regs.sp) as usize;
         writeln!(
             out,

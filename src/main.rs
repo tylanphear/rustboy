@@ -16,10 +16,10 @@
 // M-Cycle | 1.05MHz   | 1 cycle
 // T-Cycle | 4.19MHz   | 4 cycles
 
+use parking_lot::Mutex;
 use std::error::Error;
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
 
 pub mod cart;
 pub mod cpu;
@@ -60,15 +60,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         let gui_thread = s.spawn(|| {
             gui::main_loop(
                 |event| -> ControlFlow<()> {
-                    let mut ctx = ctx.lock().unwrap();
+                    let mut ctx = ctx.lock();
                     handle_event_(&event, &mut ctx)
                 },
                 |ui: &imgui::Ui, frame: imgui::TextureId| {
-                    let mut ctx = ctx.lock().unwrap();
+                    let mut ctx = ctx.lock();
                     draw_ui_(ui, frame, &mut ctx);
                 },
                 |frame: &mut lcd::ScreenBuffer| {
-                    let ctx = ctx.lock().unwrap();
+                    let ctx = ctx.lock();
                     ctx.cpu.mmu.io.lcd.draw(frame);
                 },
             );
@@ -273,7 +273,7 @@ fn compute_thread_(should_exit: &AtomicBool, ctx: &Mutex<RunCtx>) {
     }
 
     while !should_exit.load(Ordering::Relaxed) {
-        let mut ctx = ctx.lock().unwrap();
+        let mut ctx = ctx.lock();
         if ctx.ops_to_advance == 0 {
             continue;
         }

@@ -93,14 +93,8 @@ impl MMU {
         self.io.lcd.dma_do_transfer(data);
     }
 
-    pub fn load8(&self, address: u16) -> u8 {
-        // Only HRAM is accessible during OAM DMA
-        if self.clocks_til_oam_dma > 0 {
-            return match address {
-                0xFF80..=0xFFFE => self.hram[address - 0xFF80],
-                _ => 0xFF,
-            };
-        }
+    #[inline]
+    pub fn load8_unchecked(&self, address: u16) -> u8 {
         match address {
             // | BIOS   | Bootstrap program (when enabled)
             0x0000..=0x00FF if self.bios_enabled => self.bios[address - 0x0000],
@@ -131,8 +125,19 @@ impl MMU {
             // | HRAM   | Internal CPU RAM
             0xFF80..=0xFFFE => self.hram[address - 0xFF80],
             // | IE     | Interrupt Enable register
-            0xFFFF => self.ie,
+            cpu::regs::IE => self.ie,
         }
+    }
+
+    pub fn load8(&self, address: u16) -> u8 {
+        // Only HRAM is accessible during OAM DMA
+        if self.clocks_til_oam_dma > 0 {
+            return match address {
+                0xFF80..=0xFFFE => self.hram[address - 0xFF80],
+                _ => 0xFF,
+            };
+        }
+        self.load8_unchecked(address)
     }
 
     pub fn load16(&self, address: u16) -> u16 {
@@ -142,9 +147,6 @@ impl MMU {
     }
 
     pub fn store8(&mut self, address: u16, val: u8) {
-        //self.watchpoints.borrow_mut().get_mut(&address).map(|p| {
-        //    *p += 1;
-        //});
         match address {
             // | ROM0   | Non-switchable ROM
             0x0000..=0x3FFF |

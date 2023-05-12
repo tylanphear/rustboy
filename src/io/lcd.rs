@@ -200,9 +200,13 @@ impl LCDController {
         // If we've reached the end of our scanline, wrap the internal clock
         // and advance to the next scanline.
         if self.clock == CLOCKS_PER_SCANLINE {
-            self.clock -= CLOCKS_PER_SCANLINE;
-            let next_scanline = self.read_reg(reg::LY) + 1;
-            self.write_reg(reg::LY, next_scanline % NUM_SCANLINES);
+            self.clock = 0;
+            let next_scanline = self.read_reg(reg::LY).wrapping_add(1);
+            if next_scanline == NUM_SCANLINES {
+                self.write_reg(reg::LY, 0)
+            } else {
+                self.write_reg(reg::LY, next_scanline)
+            }
         }
 
         // Assume we don't need a VBlank, at first.
