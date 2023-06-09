@@ -1,5 +1,4 @@
 use crate::mmu::Mem;
-use crate::{debug_break, debug_log};
 
 // LCD display is 160x144 pixels
 const SCREEN_WIDTH: usize = 160;
@@ -254,7 +253,6 @@ impl LCDController {
 
     #[inline]
     pub fn dma_do_transfer(&mut self, offset: u16, byte: u8) {
-        debug_log!("transferring {:02X?}... to OAM[{:02X}]", byte, offset);
         assert!((offset as usize) < OAM_SIZE);
         self.oam[offset] = byte;
     }

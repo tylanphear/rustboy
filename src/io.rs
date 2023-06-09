@@ -1,6 +1,7 @@
 pub mod joypad;
 pub mod lcd;
 pub mod timer;
+use joypad::Joypad;
 use lcd::LCDController;
 use timer::Timer;
 
@@ -8,6 +9,7 @@ use timer::Timer;
 pub struct IOController {
     pub lcd: LCDController,
     pub timer: Timer,
+    pub joypad: Joypad,
 }
 
 impl IOController {
@@ -22,12 +24,7 @@ impl IOController {
 
     pub fn load(&self, address: u16) -> u8 {
         match address {
-            0xFF00 =>
-            /* todo: joypad */
-            {
-                crate::debug_log!("todo: joypad (load {address:04X})");
-                0xFF
-            }
+            0xFF00 => self.joypad.load(address),
             0xFF01..=0xFF02 =>
             /* todo: serial */
             {
@@ -52,12 +49,7 @@ impl IOController {
 
     pub fn store(&mut self, address: u16, val: u8) {
         match address {
-            0xFF00 =>
-            /* todo: joypad */
-            {
-                crate::debug_log!("todo: joypad (store {address:04X})");
-                return;
-            }
+            0xFF00 => self.joypad.store(address, val),
             0xFF40..=0xFF4B => self.lcd.store(address, val),
             0xFF10..=0xFF3F =>
             /* sound controller */

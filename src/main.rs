@@ -17,8 +17,7 @@
 // T-Cycle | 4.19MHz   | 4 cycles
 
 use parking_lot::Mutex;
-use std::error::Error;
-use std::ops::ControlFlow;
+use std::{error::Error, ops::ControlFlow};
 
 const DEBUG: bool = false;
 const M_CLOCK_PERIOD: u64 = 4_194_304;
@@ -231,11 +230,21 @@ fn draw_ui_(ui: &imgui::Ui, frame: imgui::TextureId, ctx: &mut RunCtx) {
             .unwrap();
         ui.window("timer")
             .size([200.0, 200.0], imgui::Condition::FirstUseEver)
-            .position([000.0, 400.0], imgui::Condition::FirstUseEver)
+            .position([000.0, 500.0], imgui::Condition::FirstUseEver)
             .movable(false)
             .build(|| {
                 let mut out = String::new();
                 ctx.cpu.mmu.io.timer.dump(&mut out).unwrap();
+                ui.text_wrapped(out);
+            })
+            .unwrap();
+        ui.window("joypad")
+            .size([200.0, 200.0], imgui::Condition::FirstUseEver)
+            .position([000.0, 300.0], imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                let mut out = String::new();
+                ctx.cpu.mmu.io.joypad.dump(&mut out).unwrap();
                 ui.text_wrapped(out);
             })
             .unwrap();
@@ -382,23 +391,38 @@ fn compute_thread_(ctx: &Mutex<RunCtx>) {
 
 fn handle_event_(event: &gui::Event, ctx: &mut RunCtx) -> ControlFlow<()> {
     use sdl2::keyboard::Keycode as K;
+
+    fn sdl_key_to_joypad_code(key: &sdl2::keyboard::Keycode) -> Option<u8> {
+        Some(match key {
+            K::Num1 => io::joypad::START,
+            K::Num2 => io::joypad::SELECT,
+            K::Z => io::joypad::A,
+            K::X => io::joypad::B,
+            K::Left => io::joypad::LEFT,
+            K::Right => io::joypad::RIGHT,
+            K::Up => io::joypad::UP,
+            K::Down => io::joypad::DOWN,
+            _ => return None,
+        })
+    }
+
     match event {
-        gui::Event::Exit | gui::Event::Key(K::Q) => ControlFlow::Break(()),
-        gui::Event::Key(K::R) => {
+        gui::Event::Exit | gui::Event::KeyDown(K::Q) => ControlFlow::Break(()),
+        gui::Event::KeyDown(K::R) => {
             reset_cpu(ctx);
             debug::log::reset();
             ControlFlow::Continue(())
         }
-        gui::Event::Key(K::N) => {
+        gui::Event::KeyDown(K::N) => {
             ctx.run_state =
                 RunState::Stepping(1 + (ctx.cpu.executing_op() as usize));
             ControlFlow::Continue(())
         }
-        gui::Event::Key(K::S) => {
+        gui::Event::KeyDown(K::S) => {
             ctx.run_state = RunState::Stepping(100);
             ControlFlow::Continue(())
         }
-        gui::Event::Key(K::Space) => {
+        gui::Event::KeyDown(K::Space) => {
             if ctx.run_state == RunState::Running {
                 ctx.run_state = RunState::Paused;
             } else {
@@ -406,8 +430,18 @@ fn handle_event_(event: &gui::Event, ctx: &mut RunCtx) -> ControlFlow<()> {
             }
             ControlFlow::Continue(())
         }
-        gui::Event::Key(..) | gui::Event::Unknown(..) => {
+        gui::Event::KeyUp(key) => {
+            if let Some(code) = sdl_key_to_joypad_code(key) {
+                ctx.cpu.mmu.io.joypad.up(code);
+            }
             ControlFlow::Continue(())
         }
+        gui::Event::KeyDown(key) => {
+            if let Some(code) = sdl_key_to_joypad_code(key) {
+                ctx.cpu.mmu.io.joypad.down(code);
+            }
+            ControlFlow::Continue(())
+        }
+        gui::Event::Unknown(..) => ControlFlow::Continue(()),
     }
 }

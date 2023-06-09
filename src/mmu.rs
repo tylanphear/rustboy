@@ -86,7 +86,7 @@ impl MMU {
         }
 
         if self.oam_clocks_left == NUM_OAM_CLOCKS {
-            crate::debug_log!("starting OAM DMA at {:04X}", self.oam_base_addr);
+            //crate::debug_log!("starting OAM DMA at {:04X}", self.oam_base_addr);
         }
         let offset = NUM_OAM_CLOCKS - self.oam_clocks_left;
         let addr = self.oam_base_addr + offset;

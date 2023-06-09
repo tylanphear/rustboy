@@ -16,7 +16,8 @@ fn glow_context(window: &Window) -> glow::Context {
 
 pub enum Event {
     Exit,
-    Key(sdl2::keyboard::Keycode),
+    KeyDown(sdl2::keyboard::Keycode),
+    KeyUp(sdl2::keyboard::Keycode),
     Unknown(sdl2::event::Event),
 }
 
@@ -33,7 +34,11 @@ impl From<sdl2::event::Event> for Event {
             E::KeyDown {
                 keycode: Some(code),
                 ..
-            } => Self::Key(code),
+            } => Self::KeyDown(code),
+            E::KeyUp {
+                keycode: Some(code),
+                ..
+            } => Self::KeyUp(code),
             _ => Self::Unknown(value),
         }
     }

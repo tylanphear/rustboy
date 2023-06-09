@@ -132,11 +132,13 @@ impl CPU {
         self.mmu.tick();
         let need_vblank_interrupt = self.mmu.io.lcd.tick();
         let need_timer_interrupt = self.mmu.io.timer.tick();
-        if need_timer_interrupt || need_vblank_interrupt {
+        let need_joypad_interrupt = self.mmu.io.joypad.tick();
+        if need_timer_interrupt || need_vblank_interrupt || need_joypad_interrupt {
             let iflags = self.mmu.load8_unchecked(IF);
             let vblank = (need_vblank_interrupt as u8) << 0;
             let timer = (need_timer_interrupt as u8) << 2;
-            self.mmu.store8_unchecked(IF, iflags | timer | vblank);
+            let joypad = (need_joypad_interrupt as u8) << 4;
+            self.mmu.store8_unchecked(IF, iflags | timer | vblank | joypad);
         }
 
         // Now check if we're halted. If so, and there is an interrupt
