@@ -167,11 +167,9 @@ pub fn spin_sleep(duration: std::time::Duration) {
     // Trust std::thread::sleep within 125 micros
     let sleep_time_elapsed = {
         let earlier = std::time::Instant::now();
-        if let Some(duration_to_sleep) =
-            duration.checked_sub(std::time::Duration::from_micros(125))
-        {
-            std::thread::sleep(duration_to_sleep);
-        }
+        std::thread::sleep(
+            duration.saturating_sub(std::time::Duration::from_micros(125)),
+        );
         std::time::Instant::now().duration_since(earlier)
     };
 

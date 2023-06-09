@@ -67,6 +67,7 @@ impl Joypad {
     }
 
     pub fn dump<W: std::fmt::Write>(&self, out: &mut W) -> std::fmt::Result {
+        writeln!(out, "        DULRSLBA")?;
         writeln!(out, "state:  {:08b}", self.state)?;
         writeln!(out, "select: {:02b}", self.select)?;
         writeln!(out, "interrupt: {}", self.need_interrupt)?;

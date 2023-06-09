@@ -25,7 +25,7 @@ const T_CLOCK_PERIOD: u64 = M_CLOCK_PERIOD / 4;
 const TICK_DURATION: std::time::Duration =
     std::time::Duration::from_nanos(1_000_000_000 / T_CLOCK_PERIOD);
 
-const OPS_TO_ADVANCE_PER_RUN_STEP: usize = 100;
+const OPS_TO_ADVANCE_PER_RUN_STEP: usize = 1000;
 
 pub mod cart;
 pub mod cpu;
@@ -333,7 +333,11 @@ fn compute_thread_(ctx: &Mutex<RunCtx>) {
             break;
         }
         let mut ops_to_advance = match ctx.run_state {
-            RunState::Paused => continue,
+            RunState::Paused => {
+                // When paused, sleep a little bit so we don't busy wait
+                std::thread::sleep(std::time::Duration::from_micros(100));
+                continue;
+            }
             RunState::Stepping(n) => n,
             RunState::Running => OPS_TO_ADVANCE_PER_RUN_STEP,
         };
