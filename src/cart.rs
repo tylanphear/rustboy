@@ -14,7 +14,7 @@ enum MBC {
     None,
     MBC1 {
         ram_enable: bool,
-        upper2_is_ram: bool,
+        mode: u8,
         rom_bank_lower5: u8,
         ram_or_rom_upper2: u8,
     },
@@ -31,7 +31,7 @@ impl Cartridge {
             0 => MBC::None,
             1 => MBC::MBC1 {
                 ram_enable: false,
-                upper2_is_ram: false,
+                mode: 0,
                 rom_bank_lower5: 0,
                 ram_or_rom_upper2: 0,
             },
@@ -41,14 +41,13 @@ impl Cartridge {
     }
 
     pub fn store(&mut self, address: u16, val: u8) {
-        assert!(address < 0x8000, "MBC only handles ROM-area stores");
         match self.mbc {
             MBC::None => {}
             MBC::MBC1 {
                 ref mut ram_enable,
                 ref mut rom_bank_lower5,
                 ref mut ram_or_rom_upper2,
-                ref mut upper2_is_ram,
+                ref mut mode,
             } => match address {
                 // RAM Enable
                 0x0000..=0x1FFF => {
@@ -56,7 +55,9 @@ impl Cartridge {
                 }
                 // ROM Bank (lower)
                 0x2000..=0x3FFF => {
-                    *rom_bank_lower5 = val & 0x1F;
+                    // Take the lower 5 bits -- if the result is 0, offset by 1
+                    // (mapping 0x00 to 0x01, 0x20 to 0x21, etc.)
+                    *rom_bank_lower5 = val & 0x1F + (val & 0x1F == 0) as u8;
                 }
                 // RAM Bank (or upper bits of ROM Bank)
                 0x4000..=0x5FFF => {
@@ -64,10 +65,15 @@ impl Cartridge {
                 }
                 // ROM/RAM Mode
                 0x6000..=0x7FFF => {
-                    *upper2_is_ram = val != 0;
+                    *mode = val & 0x1;
                     return;
                 }
-                _ => todo!("{address:04X}"),
+                0xA000..=0xBFFF => {
+                    todo!("properly implement SRAM");
+                }
+                _ => unreachable!(
+                    "Store outside of MBC range? ({val:02X} to {address:04X})"
+                ),
             },
         }
     }
@@ -78,20 +84,20 @@ impl Cartridge {
             MBC::MBC1 {
                 rom_bank_lower5,
                 ram_or_rom_upper2,
-                upper2_is_ram,
+                mode,
                 ..
             } => match address {
                 0x0000..=0x3FFF => address as usize,
                 0x4000..=0x7FFF => {
-                    let mut rom_bank_num = if upper2_is_ram {
-                        rom_bank_lower5
-                    } else {
-                        rom_bank_lower5 & (ram_or_rom_upper2 << 5)
-                    };
-                    // These bank numbers get mapped to +1 (e.g. 0x40 => 0x41)
-                    if [0x00, 0x20, 0x40, 0x60].contains(&rom_bank_num) {
-                        rom_bank_num += 1;
-                    }
+                    let rom_bank_num =
+                        rom_bank_lower5 | (ram_or_rom_upper2 << 5);
+                    (rom_bank_num as usize) * ROM_BANK_SIZE
+                        + (address - 0x4000) as usize
+                }
+                0xA000..=0xBFFF if mode == 0x1 => {
+                    todo!("properly implement SRAM");
+                    let rom_bank_num =
+                        rom_bank_lower5 | (ram_or_rom_upper2 << 5);
                     (rom_bank_num as usize) * ROM_BANK_SIZE
                         + (address - 0x4000) as usize
                 }

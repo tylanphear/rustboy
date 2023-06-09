@@ -28,6 +28,14 @@ pub(crate) fn wrapping_add(x: usize, y: usize, bound: usize) -> usize {
     }
 }
 
+pub(crate) fn wrapping_sub(x: usize, y: usize, bound: usize) -> usize {
+    if x < y {
+        bound - (y - x)
+    } else {
+        x - y
+    }
+}
+
 pub(crate) fn disp_chunks(
     block: &[u8],
     start: usize,
@@ -119,7 +127,7 @@ impl Regs {
 }
 
 #[derive(Debug)]
-pub struct BoundedLog<const MAX_SIZE: usize, const MAX_LINES: usize> {
+pub struct BoundedLog<const MAX_SIZE: usize, const DRAIN_LINES: usize> {
     buffer: String,
 }
 
@@ -152,5 +160,23 @@ impl<const S: usize, const L: usize> BoundedLog<S, L> {
             self.buffer.drain(0..idx);
         }
         self.buffer.push_str(s);
+    }
+}
+
+pub fn spin_sleep(duration: std::time::Duration) {
+    // Trust std::thread::sleep within 125 micros
+    let earlier = std::time::Instant::now();
+    let duration_to_sleep = duration - std::time::Duration::from_micros(125);
+    std::thread::sleep(duration_to_sleep);
+
+    // Now that we know the actual amount of time we slept, spin for the
+    // remainder time, if any.
+    let actual_time_elapsed = std::time::Instant::now().duration_since(earlier);
+    let mut remainder = duration.saturating_sub(actual_time_elapsed);
+    while !remainder.is_zero() {
+        let before = std::time::Instant::now();
+        std::thread::yield_now();
+        let elapsed = std::time::Instant::now().duration_since(before);
+        remainder = remainder.saturating_sub(elapsed);
     }
 }

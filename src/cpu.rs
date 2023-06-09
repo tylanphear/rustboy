@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use crate::mmu::MMU;
 use crate::opcodes::{self, Op, OpStatus};
 use crate::utils::Regs;
-use crate::{debug, debug_break, debug_log};
 
 pub mod regs {
     // Bit 4 - Joypad
@@ -128,13 +127,25 @@ impl CPU {
         let mut this_tick = Tick::default();
         this_tick.pc = self.regs.pc;
 
-        // First check if we're halted. If so, and there is an interrupt
+        // Tick devices (MMU/LCD/Timer) and check for interrupts that need to
+        // be flagged in IF.
+        self.mmu.tick();
+        let need_vblank_interrupt = self.mmu.io.lcd.tick();
+        let need_timer_interrupt = self.mmu.io.timer.tick();
+        if need_timer_interrupt || need_vblank_interrupt {
+            let iflags = self.mmu.load8_unchecked(IF);
+            let vblank = (need_vblank_interrupt as u8) << 0;
+            let timer = (need_timer_interrupt as u8) << 2;
+            self.mmu.store8_unchecked(IF, iflags | timer | vblank);
+        }
+
+        // Now check if we're halted. If so, and there is an interrupt
         // requested, un-halt and continue execution.
         if self.state == State::Halted {
             self.unhalt_if_interrupt_requested();
         }
 
-        // Now check if we're ready to fetch a new instruction. We check if we
+        // Next check if we're ready to fetch a new instruction. We check if we
         // need to enable interrupts, then possibly handle an interrupt (jump
         // to the interrupt vector). Once that's done, fetch/decode the
         // instruction at PC.
@@ -176,18 +187,6 @@ impl CPU {
             _ => {}
         };
 
-        // Tick devices (MMU/LCD/Timer) and check for interrupts that need to
-        // be flagged in IF.
-        self.mmu.tick();
-        let need_vblank_interrupt = self.mmu.io.lcd.tick();
-        let need_timer_interrupt = self.mmu.io.timer.tick();
-        if need_timer_interrupt || need_vblank_interrupt {
-            let iflags = self.mmu.load8_unchecked(IF);
-            let vblank = (need_vblank_interrupt as u8) << 0;
-            let timer = (need_timer_interrupt as u8) << 2;
-            self.mmu.store8(IF, iflags | timer | vblank);
-        }
-
         this_tick
     }
 
@@ -209,7 +208,7 @@ impl CPU {
 
     pub fn reset(&mut self) {
         self.regs = Regs::default();
-        self.mmu.clear();
+        self.mmu.reset();
         self.ime = false;
         self.enable_interrupts_in_n_ops = 0;
         self.state = State::RetiringOp(0);
@@ -238,6 +237,10 @@ impl CPU {
     }
 
     fn handle_interrupts(&mut self) -> bool {
+        if !self.ime {
+            return false;
+        }
+
         // An interrupt is requested if the corresponding bit of IE & IF is set,
         // with the bottom-most bit taking priority in cases where more than one
         // bit is set.
@@ -256,8 +259,10 @@ impl CPU {
         // Bit 0 - Vertical Blank - 0x0040
         let interrupt_vector = 0x40 + 0x8 * interrupt_requested;
 
-        // Clear IF to signal the interrupt was dispatched.
-        self.mmu.store8(IF, 0b11100000);
+        // Clear the correpsonding bit in IF to signal the interrupt was dispatched.
+        let if_ = self.mmu.load8(IF);
+        self.mmu
+            .store8_unchecked(IF, if_ & !(1 << interrupt_requested));
 
         // Disable interrupts.
         self.disable_interrupts();

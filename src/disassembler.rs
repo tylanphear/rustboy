@@ -4,6 +4,7 @@ use crate::opcodes::{self, op_from_code, op_from_prefixed_code, Op};
 pub struct Inst {
     pub op: &'static Op,
     pub bytes: [u8; 3],
+    pub offset: usize,
 }
 
 impl Inst {
@@ -72,8 +73,9 @@ impl<'a> Iterator for InstIter<'a> {
         for i in 0..op.num_bytes {
             bytes[i as usize] = self.at(i as usize);
         }
+        let offset = self.position;
         self.position += op.num_bytes as usize;
-        Some(Inst { op, bytes })
+        Some(Inst { op, bytes, offset })
     }
 }
 

@@ -1,13 +1,13 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
-
 use crate::cart::Cartridge;
 use crate::io::IOController;
+use crate::utils;
 use crate::{cpu, io::lcd};
 
 mod regs {
     pub const BIOS_ROM_DISABLE: u16 = 0xFF50;
 }
+
+pub const NUM_OAM_CLOCKS: u16 = 160;
 
 // Memory Map
 // 0x0000 - 0x3FFF | ROM0   | Non-switchable ROM
@@ -28,7 +28,6 @@ mod regs {
 pub struct MMU {
     bios: Mem<{ 0x0100 - 0x0000 }>,
     // vram: Mem<{ 0xA000 - 0x8000 }>,
-    sram: Mem<{ 0xC000 - 0xA000 }>,
     ram0: Mem<{ 0xD000 - 0xC000 }>,
     ramx: Mem<{ 0xE000 - 0xC000 }>,
     // echo     0xFDFF - 0xE000
@@ -39,23 +38,25 @@ pub struct MMU {
 
     cartridge: Option<Cartridge>,
     bios_enabled: bool,
-    clocks_til_oam_dma: u64,
+
+    oam_base_addr: u16,
+    oam_clocks_left: u16,
 }
 
 impl MMU {
     pub fn new() -> Self {
         Self {
             bios: Default::default(),
-            sram: Default::default(),
             ram0: Default::default(),
             ramx: Default::default(),
             io: IOController::new(),
             hram: Default::default(),
             cartridge: None,
-            bios_enabled: false,
+            bios_enabled: true,
             iflags: 0b11100000,
             ie: 0,
-            clocks_til_oam_dma: 0,
+            oam_base_addr: 0,
+            oam_clocks_left: 0,
         }
     }
 
@@ -70,32 +71,36 @@ impl MMU {
         self.cartridge = Some(cart);
     }
 
-    pub fn clear(&mut self) {
+    pub fn reset(&mut self) {
         self.bios.clear();
-        self.sram.clear();
         self.ram0.clear();
         self.ramx.clear();
         self.io.reset();
         self.hram.clear();
+        self.bios_enabled = true;
     }
 
     pub fn tick(&mut self) {
-        if self.clocks_til_oam_dma == 0 {
+        if self.oam_clocks_left == 0 {
             return;
         }
 
-        self.clocks_til_oam_dma = self.clocks_til_oam_dma.saturating_sub(4);
-        if self.clocks_til_oam_dma > 0 {
-            return;
+        if self.oam_clocks_left == NUM_OAM_CLOCKS {
+            crate::debug_log!("starting OAM DMA at {:04X}", self.oam_base_addr);
         }
+        let offset = NUM_OAM_CLOCKS - self.oam_clocks_left;
+        let addr = self.oam_base_addr + offset;
+        let byte = self.load8_unchecked(addr);
+        self.io.lcd.dma_do_transfer(offset, byte);
 
-        let data = self.io.lcd.dma_prepare_transfer(self);
-        self.io.lcd.dma_do_transfer(data);
+        self.oam_clocks_left = self.oam_clocks_left.saturating_sub(1);
     }
 
-    #[inline]
     pub fn load8_unchecked(&self, address: u16) -> u8 {
         match address {
+            cpu::regs::IF => self.iflags,
+            regs::BIOS_ROM_DISABLE => 0xE | !self.bios_enabled as u8,
+            lcd::reg::DMA => self.oam_base_addr.to_le_bytes()[0],
             // | BIOS   | Bootstrap program (when enabled)
             0x0000..=0x00FF if self.bios_enabled => self.bios[address - 0x0000],
             // | ROM0   | Cartridge ROM
@@ -103,7 +108,7 @@ impl MMU {
             // | VRAM   | Video RAM
             0x8000..=0x9FFF => self.io.lcd.load(address),
             // | SRAM   | External RAM, persistent
-            0xA000..=0xBFFF => self.sram[address - 0xA000],
+            0xA000..=0xBFFF => self.cartridge.as_ref().unwrap().load(address),
             // | WRAM0  | Work RAM
             0xC000..=0xCFFF => self.ram0[address - 0xC000],
             // | WRAMX  | Work RAM
@@ -116,8 +121,6 @@ impl MMU {
             0xFE00..=0xFE9F => self.io.lcd.load(address),
             // | UNUSED | Ignored/empty (mostly)
             0xFEA0..=0xFEFF => 0,
-            cpu::regs::IF => self.iflags,
-            regs::BIOS_ROM_DISABLE => !self.bios_enabled as u8,
             // | IO     | mem-mapped I/O registers
             0xFF00..=0xFF4B => self.io.load(address),
             // | UNUSED | Ignored/empty (mostly)
@@ -130,13 +133,6 @@ impl MMU {
     }
 
     pub fn load8(&self, address: u16) -> u8 {
-        // Only HRAM is accessible during OAM DMA
-        if self.clocks_til_oam_dma > 0 {
-            return match address {
-                0xFF80..=0xFFFE => self.hram[address - 0xFF80],
-                _ => 0xFF,
-            };
-        }
         self.load8_unchecked(address)
     }
 
@@ -147,6 +143,17 @@ impl MMU {
     }
 
     pub fn store8(&mut self, address: u16, val: u8) {
+        // Only HRAM is writeable during OAM DMA
+        if self.oam_clocks_left > 0 {
+            match address {
+                0xFF80..=0xFFFE => self.hram[address - 0xFF80] = val,
+                _ => {}
+            };
+        }
+        self.store8_unchecked(address, val)
+    }
+
+    pub fn store8_unchecked(&mut self, address: u16, val: u8) {
         match address {
             // | ROM0   | Non-switchable ROM
             0x0000..=0x3FFF |
@@ -155,7 +162,7 @@ impl MMU {
             // | VRAM   | Video RAM
             0x8000..=0x9FFF => self.io.lcd.store(address, val),
             // | SRAM   | External RAM, persistent
-            0xA000..=0xBFFF => self.sram[address - 0xA000] = val,
+            0xA000..=0xBFFF => self.cartridge.as_mut().unwrap().store(address, val),
             // | WRAM0  | Work RAM
             0xC000..=0xCFFF => self.ram0[address - 0xC000] = val,
             // | WRAMX  | Work RAM
@@ -169,13 +176,13 @@ impl MMU {
             // | UNUSED | Ignored/empty (mostly)
             0xFEA0..=0xFEFF => return,
             cpu::regs::IF => self.iflags = val | 0b11100000,
-            regs::BIOS_ROM_DISABLE => if val == 0x1 {
+            regs::BIOS_ROM_DISABLE => if val & 0x1 != 0 {
                 self.bios_enabled = false;
             }
             lcd::reg::DMA => {
-                assert_eq!(self.clocks_til_oam_dma, 0);
-                self.clocks_til_oam_dma = 140;
-                self.io.lcd.store(lcd::reg::DMA, val);
+                assert_eq!(self.oam_clocks_left, 0);
+                self.oam_clocks_left = NUM_OAM_CLOCKS;
+                self.oam_base_addr = u16::from_le_bytes([0x00, val]);
             }
             // | IO     | mem-mapped I/O registers
             0xFF00..=0xFF4B => self.io.store(address, val),
@@ -215,7 +222,7 @@ impl MMU {
             // | VRAM   | Video RAM
             0x8000..=0x9FFF => self.io.lcd.block_load(address, len),
             // | SRAM   | External RAM, persistent
-            0xA000..=0xBFFF => load_(&self.sram, 0xA000, address, len),
+            0xA000..=0xBFFF => self.cartridge.as_ref().unwrap().block_load(address, len),
             // | WRAM0  | Work RAM
             0xC000..=0xCFFF => load_(&self.ram0, 0xC000, address, len),
             // | WRAMX  | Work RAM
@@ -252,6 +259,10 @@ impl<const SIZE: usize> Mem<SIZE> {
 
     pub fn size(&self) -> usize {
         SIZE
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
     }
 
     pub fn slice(&self, addr: u16, n: usize) -> &[u8] {

@@ -26,10 +26,12 @@ impl Timer {
         let mut need_interrupt = false;
         if self.enabled() {
             if self.clock % self.clock_rate() == 0 {
-                self.tima += 1;
-                if self.tima == u8::MAX {
+                let (new_tima, overflowed) = self.tima.overflowing_add(1);
+                if overflowed {
                     need_interrupt = true;
                     self.tima = self.tma;
+                } else {
+                    self.tima = new_tima;
                 }
             }
         }

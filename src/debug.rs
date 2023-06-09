@@ -2,8 +2,7 @@ pub mod log {
     use crate::utils::{constants::SIXTY_FOUR_K, BoundedLog};
     use once_cell::sync::Lazy;
     use std::sync::Mutex;
-    const MAX_SIZE: usize = SIXTY_FOUR_K;
-    pub static LOG: Lazy<Mutex<BoundedLog<MAX_SIZE, 1000>>> =
+    pub static LOG: Lazy<Mutex<BoundedLog<SIXTY_FOUR_K, 1000>>> =
         Lazy::new(|| Mutex::new(Default::default()));
 
     pub fn push<S: AsRef<str>>(data: S) {
@@ -13,7 +12,9 @@ pub mod log {
     }
 
     pub fn reset() {
-        let _ = LOG.lock().map(|mut it| it.clear());
+        if let Ok(ref mut log) = LOG.lock() {
+            log.clear();
+        }
     }
 
     #[macro_export]
@@ -31,15 +32,20 @@ pub mod log {
     }
 }
 
-use std::sync::atomic::AtomicBool;
-pub static BREAK: AtomicBool = AtomicBool::new(false);
-#[macro_export]
-macro_rules! debug_break {
+pub mod break_ {
+    use std::sync::atomic::AtomicBool;
+    pub static TOGGLE: AtomicBool = AtomicBool::new(false);
+    pub fn check_and_unset() -> bool {
+        TOGGLE.swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+    #[macro_export]
+    macro_rules! debug_break {
     () => {
-        $crate::debug::BREAK.store(true, std::sync::atomic::Ordering::Release);
+        $crate::debug::break_::TOGGLE.store(true, std::sync::atomic::Ordering::Release);
     };
     ($($args:tt)*) => {{
         $crate::debug_log!($($args)*);
-        debug_break!();
+        $crate::debug_break!();
     }};
+}
 }

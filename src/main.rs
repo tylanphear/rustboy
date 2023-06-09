@@ -19,7 +19,14 @@
 use parking_lot::Mutex;
 use std::error::Error;
 use std::ops::ControlFlow;
-use std::sync::atomic::{AtomicBool, Ordering};
+
+const DEBUG: bool = false;
+const M_CLOCK_PERIOD: u64 = 4_194_304;
+const T_CLOCK_PERIOD: u64 = M_CLOCK_PERIOD / 4;
+const TICK_DURATION: std::time::Duration =
+    std::time::Duration::from_nanos(1_000_000_000 / T_CLOCK_PERIOD);
+
+const OPS_TO_ADVANCE_PER_RUN_STEP: usize = 100;
 
 pub mod cart;
 pub mod cpu;
@@ -50,12 +57,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         cpu.mmu.load_cart(rom);
         Mutex::new(RunCtx {
             cpu,
-            ops_to_advance: 0,
+            run_state: if DEBUG {
+                RunState::Paused
+            } else {
+                RunState::Running
+            },
             mem_addr: None,
             command_buffer: Default::default(),
+            exit_requested: false,
         })
     };
-    let should_exit = AtomicBool::new(false);
     std::thread::scope(|s| {
         let gui_thread = s.spawn(|| {
             gui::main_loop(
@@ -73,9 +84,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 },
             );
         });
-        let compute_thread = s.spawn(|| compute_thread_(&should_exit, &ctx));
+        let compute_thread = s.spawn(|| compute_thread_(&ctx));
         gui_thread.join().unwrap();
-        should_exit.store(true, Ordering::Release);
+        ctx.lock().exit_requested = true;
         compute_thread.join().unwrap();
     });
     Ok(())
@@ -91,7 +102,7 @@ fn read_rom(path: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 
 #[derive(Debug)]
 struct CommandBuffer {
-    buffer: BoundedLog<0x10000, 100>,
+    buffer: BoundedLog</*MAX_SIZE*/ 0x10000, /*DRAIN_LINES*/ 100>,
     new_added: bool,
 }
 
@@ -116,132 +127,167 @@ impl CommandBuffer {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunState {
+    Paused,
+    Stepping(usize),
+    Running,
+}
+
 struct RunCtx {
     cpu: CPU,
-    ops_to_advance: i64,
+    run_state: RunState,
     mem_addr: Option<u16>,
     command_buffer: CommandBuffer,
+    exit_requested: bool,
 }
 
 fn draw_ui_(ui: &imgui::Ui, frame: imgui::TextureId, ctx: &mut RunCtx) {
-    ui.window("command")
-        .size([270.0, 500.0], imgui::Condition::FirstUseEver)
-        .position([200.0, 000.0], imgui::Condition::FirstUseEver)
-        .movable(false)
-        .build(|| {
-            ui.text_wrapped(ctx.command_buffer.buffer.as_str());
-            if ctx.command_buffer.new_added {
-                ui.set_scroll_here_y_with_ratio(1.0);
-                ctx.command_buffer.new_added = false;
-            }
-        })
-        .unwrap();
-    ui.window("regs")
-        .size([220.0, 200.0], imgui::Condition::FirstUseEver)
-        .position([470.0, 000.0], imgui::Condition::FirstUseEver)
-        .movable(false)
-        .build(|| {
-            let mut regs = String::new();
-            ctx.cpu.dump(&mut regs).unwrap();
-            ui.text_wrapped(&regs);
-        })
-        .unwrap();
-    ui.window("mem")
-        .size([600.0, 500.0], imgui::Condition::FirstUseEver)
-        .position([690.0, 000.0], imgui::Condition::FirstUseEver)
-        .movable(false)
-        .build(|| {
-            let start = ctx.mem_addr.unwrap_or(0) as usize;
-            let block = ctx.cpu.mmu.block_load(start as u16, 0x200);
-            ui.text(utils::disp_chunks(block, start, 0x10));
-        })
-        .unwrap();
-    ui.window("control")
-        .size([220.0, 300.0], imgui::Condition::FirstUseEver)
-        .position([470.0, 200.0], imgui::Condition::FirstUseEver)
-        .movable(false)
-        .build(|| {
-            let mut addr_str = String::new();
-            let bp_changed = ui
-                .input_text("breakpoint", &mut addr_str)
-                .enter_returns_true(true)
-                .build();
-            if bp_changed {
-                if let Some(addr) = parse_addr(&addr_str) {
-                    ctx.cpu.breakpoints.register(addr);
+    if DEBUG {
+        ui.window("command")
+            .size([270.0, 500.0], imgui::Condition::FirstUseEver)
+            .position([200.0, 000.0], imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                ui.text_wrapped(ctx.command_buffer.buffer.as_str());
+                if ctx.command_buffer.new_added {
+                    ui.set_scroll_here_y_with_ratio(1.0);
+                    ctx.command_buffer.new_added = false;
                 }
-                addr_str.clear();
-            }
-            let mem_changed = ui
-                .input_text("mem", &mut addr_str)
-                .enter_returns_true(true)
-                .build();
-            if mem_changed {
-                ctx.mem_addr = parse_addr(&addr_str);
-            }
-            let breaks = ctx.cpu.breakpoints.dump();
-            if !breaks.is_empty() {
-                ui.text(breaks);
-            }
-        })
-        .unwrap();
-    ui.window("display")
-        .size([160.0 + 10.0, 144.0 + 10.0], imgui::Condition::FirstUseEver)
-        .position([020.0, 000.0], imgui::Condition::FirstUseEver)
-        .movable(false)
-        .build(|| {
-            let [win_x, win_y] = ui.window_pos();
-            ui.get_window_draw_list()
-                .add_image(
-                    frame,
-                    [win_x + 5.0, win_y + 5.0],
-                    [win_x + 160.0, win_y + 144.0],
-                )
-                .build();
-        });
-    ui.window("lcd")
-        .size([180.0, 200.0], imgui::Condition::FirstUseEver)
-        .position([020.0, 150.0], imgui::Condition::FirstUseEver)
-        .movable(false)
-        .build(|| {
-            let mut out = String::new();
-            ctx.cpu.mmu.io.lcd.dump(&mut out).unwrap();
-            ui.text_wrapped(out);
-        })
-        .unwrap();
-    ui.window("timer")
-        .size([200.0, 200.0], imgui::Condition::FirstUseEver)
-        .position([000.0, 400.0], imgui::Condition::FirstUseEver)
-        .movable(false)
-        .build(|| {
-            let mut out = String::new();
-            ctx.cpu.mmu.io.timer.dump(&mut out).unwrap();
-            ui.text_wrapped(out);
-        })
-        .unwrap();
-    ui.window("log")
-        .size([500.0, 200.0], imgui::Condition::FirstUseEver)
-        .position([200.0, 500.0], imgui::Condition::FirstUseEver)
-        .movable(false)
-        .build(|| {
-            ui.text_wrapped(debug_log_as_str!());
-            ui.set_scroll_here_y_with_ratio(1.0);
-        })
-        .unwrap();
-    ui.window("disassembly")
-        .size([200.0, 200.0], imgui::Condition::FirstUseEver)
-        .position([500.0, 500.0], imgui::Condition::FirstUseEver)
-        .movable(false)
-        .build(|| {
-            let bytes = ctx.cpu.mmu.block_load(ctx.cpu.regs.pc, usize::MAX);
-            let insts: Vec<_> =
-                disassembler::insts_til_unconditional_jump(bytes)
-                    .take(15)
-                    .map(|it| it.to_string())
-                    .collect();
-            ui.text_wrapped(insts.join("\n"));
-        })
-        .unwrap();
+            })
+            .unwrap();
+        ui.window("regs")
+            .size([220.0, 200.0], imgui::Condition::FirstUseEver)
+            .position([470.0, 000.0], imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                let mut regs = String::new();
+                ctx.cpu.dump(&mut regs).unwrap();
+                ui.text_wrapped(&regs);
+            })
+            .unwrap();
+        ui.window("mem")
+            .size([600.0, 500.0], imgui::Condition::FirstUseEver)
+            .position([690.0, 000.0], imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                let start = ctx.mem_addr.unwrap_or(0) as usize;
+                let block = ctx.cpu.mmu.block_load(start as u16, 0x200);
+                ui.text(utils::disp_chunks(block, start, 0x10));
+            })
+            .unwrap();
+        ui.window("control")
+            .size([220.0, 300.0], imgui::Condition::FirstUseEver)
+            .position([470.0, 200.0], imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                let mut addr_str = String::new();
+                let bp_changed = ui
+                    .input_text("breakpoint", &mut addr_str)
+                    .enter_returns_true(true)
+                    .build();
+                if bp_changed {
+                    if let Some(addr) = parse_addr(&addr_str) {
+                        ctx.cpu.breakpoints.register(addr);
+                    }
+                    addr_str.clear();
+                }
+                let mem_changed = ui
+                    .input_text("mem", &mut addr_str)
+                    .enter_returns_true(true)
+                    .build();
+                if mem_changed {
+                    ctx.mem_addr = parse_addr(&addr_str);
+                }
+                let breaks = ctx.cpu.breakpoints.dump();
+                if !breaks.is_empty() {
+                    ui.text(breaks);
+                }
+            })
+            .unwrap();
+        ui.window("display")
+            .size([160.0 + 10.0, 144.0 + 10.0], imgui::Condition::FirstUseEver)
+            .position([020.0, 000.0], imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                let [win_x, win_y] = ui.window_pos();
+                ui.get_window_draw_list()
+                    .add_image(
+                        frame,
+                        [win_x + 5.0, win_y + 5.0],
+                        [win_x + 160.0, win_y + 144.0],
+                    )
+                    .build();
+            });
+        ui.window("lcd")
+            .size([180.0, 200.0], imgui::Condition::FirstUseEver)
+            .position([020.0, 150.0], imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                let mut out = String::new();
+                ctx.cpu.mmu.io.lcd.dump(&mut out).unwrap();
+                ui.text_wrapped(out);
+            })
+            .unwrap();
+        ui.window("timer")
+            .size([200.0, 200.0], imgui::Condition::FirstUseEver)
+            .position([000.0, 400.0], imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                let mut out = String::new();
+                ctx.cpu.mmu.io.timer.dump(&mut out).unwrap();
+                ui.text_wrapped(out);
+            })
+            .unwrap();
+        ui.window("log")
+            .size([500.0, 200.0], imgui::Condition::FirstUseEver)
+            .position([200.0, 500.0], imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                ui.text_wrapped(debug_log_as_str!());
+                ui.set_scroll_here_y_with_ratio(1.0);
+            })
+            .unwrap();
+        ui.window("disassembly")
+            .size([200.0, 200.0], imgui::Condition::FirstUseEver)
+            .position([500.0, 500.0], imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                let bytes = ctx.cpu.mmu.block_load(ctx.cpu.regs.pc, usize::MAX);
+                let insts: Vec<_> =
+                    disassembler::insts_til_unconditional_jump(bytes)
+                        .take(15)
+                        .map(|it| {
+                            format!(
+                                "{:04X}: {}",
+                                ctx.cpu.regs.pc + (it.offset as u16),
+                                it.to_string()
+                            )
+                        })
+                        .collect();
+                ui.text_wrapped(insts.join("\n"));
+            })
+            .unwrap();
+    } else {
+        const SCALE: f32 = 4.0;
+        ui.window("display")
+            .size(
+                [SCALE * 160.0 + 10.0, SCALE * 144.0 + 10.0],
+                imgui::Condition::FirstUseEver,
+            )
+            .position([020.0, 000.0], imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                let [win_x, win_y] = ui.window_pos();
+                ui.get_window_draw_list()
+                    .add_image(
+                        frame,
+                        [win_x + 5.0, win_y + 5.0],
+                        [win_x + SCALE * 160.0, win_y + SCALE * 144.0],
+                    )
+                    .build();
+            });
+    }
 }
 
 fn parse_addr(break_addr_str: &str) -> Option<u16> {
@@ -260,7 +306,7 @@ fn reset_cpu(ctx: &mut RunCtx) {
     ctx.cpu.mmu.load_bios(BIOS);
 }
 
-fn compute_thread_(should_exit: &AtomicBool, ctx: &Mutex<RunCtx>) {
+fn compute_thread_(ctx: &Mutex<RunCtx>) {
     use std::fmt::Write;
 
     let mut scratch_str = String::new();
@@ -272,41 +318,64 @@ fn compute_thread_(should_exit: &AtomicBool, ctx: &Mutex<RunCtx>) {
         }}
     }
 
-    while !should_exit.load(Ordering::Relaxed) {
+    loop {
         let mut ctx = ctx.lock();
-        if ctx.ops_to_advance == 0 {
-            continue;
+        if ctx.exit_requested {
+            break;
         }
-        let Tick {
-            pc,
-            breakpoint_was_hit,
-            op_was_fetched,
-            op_was_retired,
-        } = ctx.cpu.tick();
-        if breakpoint_was_hit || debug::BREAK.swap(false, Ordering::AcqRel) {
-            ctx.ops_to_advance = 0;
-            ctx.command_buffer.push(f!("Hit breakpoint '{0:04X?}'", pc));
-            ctx.cpu.breakpoints.reset(pc);
-        }
-        if op_was_fetched {
-            let RunCtx {
-                ref mut cpu,
-                ref mut command_buffer,
-                ..
-            } = *ctx;
-            let op = cpu.current_op().unwrap();
-            let bytes = cpu.mmu.block_load(pc, op.num_bytes as usize);
-            command_buffer.push(f!(
-                "{0:04X}: {1} [{2}]",
+        let mut ops_to_advance = match ctx.run_state {
+            RunState::Paused => continue,
+            RunState::Stepping(n) => n,
+            RunState::Running => OPS_TO_ADVANCE_PER_RUN_STEP,
+        };
+        let mut ticks_elapsed = 0;
+        let before = std::time::Instant::now();
+        while ops_to_advance > 0 {
+            let Tick {
                 pc,
-                op.to_string(bytes),
-                op.clocks / 4,
-            ));
-        }
-        if op_was_retired {
-            if ctx.ops_to_advance > 0 {
-                ctx.ops_to_advance = ctx.ops_to_advance.wrapping_sub(1);
+                breakpoint_was_hit,
+                op_was_fetched,
+                op_was_retired,
+            } = ctx.cpu.tick();
+            if DEBUG {
+                if breakpoint_was_hit || debug::break_::check_and_unset() {
+                    ctx.run_state = RunState::Paused;
+                    ctx.command_buffer
+                        .push(f!("Hit breakpoint '{0:04X?}'", pc));
+                    ctx.cpu.breakpoints.reset(pc);
+                }
             }
+            if op_was_fetched {
+                let RunCtx {
+                    ref cpu,
+                    ref mut command_buffer,
+                    ..
+                } = *ctx;
+                let op = cpu.current_op().unwrap();
+                let bytes = cpu.mmu.block_load(pc, op.num_bytes as usize);
+                if DEBUG {
+                    command_buffer.push(f!(
+                        "{0:04X}: {1} {2:02X?}",
+                        pc,
+                        op.to_string(bytes),
+                        bytes,
+                    ));
+                }
+            }
+            if op_was_retired {
+                ops_to_advance = ops_to_advance.saturating_sub(1);
+            }
+            ticks_elapsed += 1;
+        }
+        let elapsed = std::time::Instant::now().duration_since(before);
+        match ctx.run_state {
+            RunState::Stepping(..) => ctx.run_state = RunState::Paused,
+            RunState::Running => {
+                let tick_time = ticks_elapsed * TICK_DURATION;
+                let time_to_sleep = tick_time.saturating_sub(elapsed);
+                crate::utils::spin_sleep(time_to_sleep);
+            }
+            _ => {}
         }
     }
 }
@@ -321,18 +390,19 @@ fn handle_event_(event: &gui::Event, ctx: &mut RunCtx) -> ControlFlow<()> {
             ControlFlow::Continue(())
         }
         gui::Event::Key(K::N) => {
-            ctx.ops_to_advance = 1 + (ctx.cpu.executing_op() as i64);
+            ctx.run_state =
+                RunState::Stepping(1 + (ctx.cpu.executing_op() as usize));
             ControlFlow::Continue(())
         }
         gui::Event::Key(K::S) => {
-            ctx.ops_to_advance = 100;
+            ctx.run_state = RunState::Stepping(100);
             ControlFlow::Continue(())
         }
         gui::Event::Key(K::Space) => {
-            if ctx.ops_to_advance == -1 {
-                ctx.ops_to_advance = 0
+            if ctx.run_state == RunState::Running {
+                ctx.run_state = RunState::Paused;
             } else {
-                ctx.ops_to_advance = -1;
+                ctx.run_state = RunState::Running;
             }
             ControlFlow::Continue(())
         }

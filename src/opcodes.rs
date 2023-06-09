@@ -1,7 +1,6 @@
 #![deny(unreachable_patterns)]
 
 use crate::cpu::CPU;
-use crate::debug_break;
 use crate::utils;
 
 pub type OpHandler = fn(&mut CPU, [u8; 2], u8) -> OpStatus;
@@ -409,7 +408,7 @@ const OPS: [Op; 0x100] = [
     /* 0x33 */ op!("INC SP", 1, 8, alu16, INC16, SP),
     /* 0x34 */ op!("INC (HL)", 1, 12, alu2, INC, MEM_HL),
     /* 0x35 */ op!("DEC (HL)", 1, 12, alu2, DEC, MEM_HL),
-    /* 0x36 */ op!("LD (HL),d8", 2, 8, load, MEM_HL, D8),
+    /* 0x36 */ op!("LD (HL),d8", 2, 12, load, MEM_HL, D8),
     /* 0x37 */ op!("SCF", 1, 4, alu2, SCF),
     /* 0x38 */ op!("JR C, r8", 2, 8, cfu, JR, CONDC),
     /* 0x39 */ op!("ADD HL, SP", 1, 8, alu16, ADDHL, SP),
@@ -633,7 +632,7 @@ const PREFIXED_OPS: [Op; 0x100] = [
     /* 0x11 */ op!("RL C", 2, 8, rot, RL, C),
     /* 0x12 */ op!("RL D", 2, 8, rot, RL, D),
     /* 0x13 */ op!("RL E", 2, 8, rot, RL, E),
-    /* 0x14 */ op!("RL H", 2, 8, rot, RLC, H),
+    /* 0x14 */ op!("RL H", 2, 8, rot, RL, H),
     /* 0x15 */ op!("RL L", 2, 8, rot, RL, L),
     /* 0x16 */ op!("RL (HL)", 2, 16, rot, RL, MEM_HL),
     /* 0x17 */ op!("RL A", 2, 8, rot, RL, A),
@@ -1043,11 +1042,8 @@ fn load16(cpu: &mut CPU, args: [u8; 2], _: u8) -> OpStatus {
         ld16::LDHLSPr8 => {
             let r8 = readsrc(cpu, D8) as i8 as i16;
             let sp = cpu.regs.sp;
-            let (res, carry, halfcarry) = if r8 > 0 {
-                add_with_carry(sp, r8 as u16, 0, 0x100, 0x10)
-            } else {
-                sub_with_carry(sp, -r8 as u16, 0, 0x100, 0x10)
-            };
+            let (res, carry, halfcarry) =
+                add_with_carry(sp, r8 as u16, 0, 0x100, 0x10);
             cpu.regs.hl.set_word(res);
             cpu.regs.set_zero_flag(0);
             cpu.regs.set_sub_flag(0);
@@ -1097,11 +1093,8 @@ fn alu16(cpu: &mut CPU, args: [u8; 2], _: u8) -> OpStatus {
         alu16::ADDSP => {
             let sp = cpu.regs.sp;
             let imm = readsrc(cpu, D8) as i8 as i16;
-            let (res, carry, halfcarry) = if imm > 0 {
-                add_with_carry(sp, imm as u16, 0, 0x100, 0x10)
-            } else {
-                sub_with_carry(sp, -imm as u16, 0, 0x100, 0x10)
-            };
+            let (res, carry, halfcarry) =
+                add_with_carry(sp, imm as u16, 0, 0x100, 0x10);
             writeback16(cpu, SP, res);
             cpu.regs.set_zero_flag(0);
             cpu.regs.set_sub_flag(0);
@@ -1327,7 +1320,7 @@ fn rot(cpu: &mut CPU, args: [u8; 2], _: u8) -> OpStatus {
         // Swap nibbles
         cb_rot::SWAP => {
             let val = readsrc(cpu, reg);
-            let (upper, lower) = (val & 0xF0, val & 0x0F);
+            let (upper, lower) = ((val & 0xF0) >> 4, (val & 0x0F) >> 0);
             let result = (lower << 4) | (upper << 0);
             writeback(cpu, reg, result);
             check_zero_flag(cpu, result);
@@ -1549,9 +1542,9 @@ mod tests {
         check(0x0000, 0x01, 0x0001, 0, 0);
         check(0x0010, 0x01, 0x0011, 0, 0);
         check(0x00FF, 0x01, 0x0100, 1, 1);
-        check(0x00FF, 0xFF, 0x00FE, 0, 0);
-        check(0x0000, 0xFF, 0xFFFF, 1, 1);
-        check(0x00F0, 0xFF, 0x00EF, 0, 1);
+        check(0x00FF, 0xFF, 0x00FE, 1, 1);
+        check(0x0000, 0xFF, 0xFFFF, 0, 0);
+        check(0x00F0, 0xFF, 0x00EF, 1, 0);
     }
 
     #[test]

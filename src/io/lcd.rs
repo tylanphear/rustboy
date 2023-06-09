@@ -103,6 +103,11 @@ const OAM_SIZE: usize = 0xA0;
 type Vram = Mem<VRAM_SIZE>;
 type Oam = Mem<OAM_SIZE>;
 
+enum TileAddressMode {
+    Signed,
+    Unsigned,
+}
+
 #[derive(Debug, Default)]
 pub struct LCDController {
     clock: u64,
@@ -168,8 +173,12 @@ impl LCDController {
             self.read_reg(reg::WX),
             reg::WX
         )?;
-        writeln!(out, "BG TILE MAP: {0:04X}", self.bg_tile_map_addr(),)?;
-        writeln!(out, "WI TILE MAP: {0:04X}", self.window_tile_map_addr(),)?;
+        if self.bg_and_window_enabled() {
+            writeln!(out, "BG TILE MAP: {0:04X}", self.bg_tile_map_addr(),)?;
+        }
+        if self.window_enabled() {
+            writeln!(out, "WI TILE MAP: {0:04X}", self.window_tile_map_addr(),)?;
+        }
         Ok(())
     }
 
@@ -217,10 +226,10 @@ impl LCDController {
             // Not in VBlank
             0..=143 => match self.clock {
                 0 => self.set_mode(0),
-                1..=19 => self.set_mode(2),
-                20..=111 => self.set_mode(3),
-                112..=113 => self.set_mode(0),
-                CLOCKS_PER_SCANLINE.. => unreachable!(),
+                1 => self.set_mode(2),
+                20 => self.set_mode(3),
+                112 => self.set_mode(0),
+                _ => {}
             },
             // VBlank is about to begin
             144 => match self.clock {
@@ -230,37 +239,24 @@ impl LCDController {
                     self.set_mode(1);
                     need_vblank = true;
                 }
-                2..=113 => self.set_mode(1),
-                CLOCKS_PER_SCANLINE.. => unreachable!(),
+                _ => {}
             },
-            // Still in VBlank
-            145..=152 => self.set_mode(1),
             // Last VBlank cycle
             NUM_SCANLINES => match self.clock {
                 0 => self.set_mode(1),
-                1..=113 => {
-                    self.set_mode(1);
-                    self.write_reg(reg::LY, 0);
-                }
-                CLOCKS_PER_SCANLINE.. => unreachable!(),
+                1 => self.write_reg(reg::LY, 0),
+                _ => {}
             },
-            _ => unreachable!(),
+            _ => {}
         };
         need_vblank
     }
 
-    pub fn dma_prepare_transfer(&self, mmu: &MMU) -> Vec<u8> {
-        let base = self.read_reg(reg::DMA);
-        let addr = (base as u16) << 8;
-        debug_break!();
-        debug_log!("preparing for DMA transfer from {addr:04X}");
-        mmu.block_load(addr, OAM_SIZE).to_vec()
-    }
-
-    pub fn dma_do_transfer(&mut self, data: Vec<u8>) {
-        debug_log!("transferring {:02X?}... to OAM", &data[0..2]);
-        assert_eq!(data.len(), OAM_SIZE);
-        self.oam.copy_from_slice(&data);
+    #[inline]
+    pub fn dma_do_transfer(&mut self, offset: u16, byte: u8) {
+        debug_log!("transferring {:02X?}... to OAM[{:02X}]", byte, offset);
+        assert!((offset as usize) < OAM_SIZE);
+        self.oam[offset] = byte;
     }
 
     fn lcd_display_enabled(&self) -> bool {
@@ -285,6 +281,7 @@ impl LCDController {
 
     pub fn load(&self, address: u16) -> u8 {
         match address {
+            reg::DMA => panic!("should be handled by MMU!"),
             0xFF40..=0xFF4B => self.read_reg(address),
             VRAM_START..=VRAM_END if self.vram_is_inaccessible() => 0xFF,
             VRAM_START..=VRAM_END => self.vram[address - VRAM_START],
@@ -296,9 +293,6 @@ impl LCDController {
 
     pub fn store(&mut self, address: u16, val: u8) {
         match address {
-            reg::STAT => {
-                self.write_reg(reg::STAT, val & 0x80);
-            }
             reg::LCDC => {
                 let was_powered_on = self.lcd_display_enabled();
                 self.write_reg(reg::LCDC, val);
@@ -306,6 +300,11 @@ impl LCDController {
                     self.write_reg(reg::LY, 0);
                 }
             }
+            reg::STAT => {
+                self.write_reg(reg::STAT, val & 0x80);
+            }
+            reg::LY => {}
+            reg::DMA => panic!("should be handled by MMU!"),
             0xFF40..=0xFF4B => {
                 self.write_reg(address, val);
             }
@@ -399,79 +398,121 @@ impl LCDController {
             return;
         }
 
-        let get_tile = self.tile_data_fn();
-
-        // Iterate over screen pixels and draw background
-        self.draw_tiles_to_screen(
-            self.read_reg(reg::SCX),
-            self.read_reg(reg::SCY),
-            self.bg_tile_map(),
-            get_tile,
-            bg_palette,
-            screen,
-        );
+        self.draw_background(bg_palette, screen);
 
         if self.window_enabled() {
-            self.draw_tiles_to_screen(
-                0,
-                0,
-                self.window_tile_map(),
-                get_tile,
-                bg_palette,
-                screen,
-            );
+            self.draw_window(bg_palette, screen);
         }
+
+        self.draw_oam(screen);
     }
 
-    fn draw_tiles_to_screen(
-        &self,
-        off_x: u8,
-        off_y: u8,
-        tile_map: &[u8],
-        get_tile: fn(&LCDController, u8) -> &[u8],
-        palette: [u8; 4],
-        screen: &mut ScreenBuffer,
-    ) {
+    fn draw_background(&self, bg_palette: [u8; 4], screen: &mut ScreenBuffer) {
         for y in 0..SCREEN_HEIGHT {
             for x in 0..SCREEN_WIDTH {
                 let (bg_x, bg_y) = (
-                    utils::wrapping_add(x, off_x as usize, BG_WIDTH),
-                    utils::wrapping_add(y, off_y as usize, BG_HEIGHT),
+                    utils::wrapping_add(
+                        x,
+                        self.read_reg(reg::SCX) as usize,
+                        BG_WIDTH,
+                    ),
+                    utils::wrapping_add(
+                        y,
+                        self.read_reg(reg::SCY) as usize,
+                        BG_HEIGHT,
+                    ),
                 );
 
-                // First locate which tile this pixel is in. Imagining a 20x18
-                // grid of tiles, identify our tile's (x, y) by dividing each
-                // component by the width and height, respectively. From this
-                // coordinate, we can determine our tile offset, look up our
-                // tile number, and finally get our tile's data.
-                let (tile_x, tile_y) =
-                    (bg_x / TILE_WIDTH_IN_PIXELS, bg_y / TILE_HEIGHT_IN_PIXELS);
-                let tile_offset = tile_y * NUM_TILES_IN_X + tile_x;
-
-                let tile_num = tile_map[tile_offset];
-                let tile = get_tile(self, tile_num as u8);
-
-                // Next, determine our sub-pixel location (within the tile), by
-                // re-orienting our point's origin to the starting (x,y) of our
-                // tile.
-                let (sub_x, sub_y) =
-                    (bg_x % TILE_WIDTH_IN_PIXELS, bg_y % TILE_HEIGHT_IN_PIXELS);
-                let subpixel = sub_y * TILE_WIDTH_IN_PIXELS + sub_x;
-
-                // Get our current pixel's color number from its tile, then map
-                // that to according to the current palette, and write it to
-                // the screen buffer.
-                let cnum = pixel_color_num_in_tile(tile, subpixel);
-                let color = palette[cnum as usize];
+                let color = self.get_tile_pixel_color(
+                    bg_x,
+                    bg_y,
+                    self.bg_tile_map(),
+                    bg_palette,
+                );
                 screen[y * SCREEN_WIDTH + x] = color;
             }
         }
     }
 
-    fn tile_data_fn(&self) -> fn(&Self, u8) -> &[u8] {
+    fn draw_window(&self, bg_palette: [u8; 4], screen: &mut ScreenBuffer) {
+        for y in 0..SCREEN_HEIGHT {
+            for x in 0..SCREEN_WIDTH {
+                let (bg_x, bg_y) = (
+                    utils::wrapping_sub(
+                        x,
+                        self.read_reg(reg::WX).saturating_sub(7) as usize,
+                        BG_WIDTH,
+                    ),
+                    utils::wrapping_sub(
+                        y,
+                        self.read_reg(reg::WY) as usize,
+                        BG_HEIGHT,
+                    ),
+                );
+
+                let color = self.get_tile_pixel_color(
+                    bg_x,
+                    bg_y,
+                    self.window_tile_map(),
+                    bg_palette,
+                );
+                screen[y * SCREEN_WIDTH + x] = color;
+            }
+        }
+    }
+
+    fn draw_oam(&self, screen: &mut ScreenBuffer) {
+        for sprite in self.oam.as_slice().chunks(4) {
+            let [y, x, idx, attrs] = *sprite else {
+                unreachable!("odd sized sprite?")
+            };
+        }
+    }
+
+    fn get_tile_pixel_color(
+        &self,
+        bg_x: usize,
+        bg_y: usize,
+        tile_map: &[u8],
+        palette: [u8; 4],
+    ) -> u8 {
+        // First locate which tile this pixel is in. Imagining a 20x18 grid of
+        // tiles, identify our tile's (x, y) by dividing each component by the
+        // width and height, respectively. From this coordinate, we can
+        // determine our tile offset, look up our tile number, and get our
+        // tile's data.
+        let (tile_x, tile_y) =
+            (bg_x / TILE_WIDTH_IN_PIXELS, bg_y / TILE_HEIGHT_IN_PIXELS);
+        let tile_offset = tile_y * NUM_TILES_IN_X + tile_x;
+
+        let tile_num = tile_map[tile_offset];
+        let tile = match self.tile_address_mode() {
+            TileAddressMode::Signed => {
+                Self::tile_at_signed_addr(self, tile_num as u8)
+            }
+            TileAddressMode::Unsigned => {
+                Self::tile_at_unsigned_addr(self, tile_num as u8)
+            }
+        };
+
+        // Next, determine our sub-tile pixel location by re-orienting our
+        // point's origin to the starting (x,y) of our tile.
+        let (sub_x, sub_y) =
+            (bg_x % TILE_WIDTH_IN_PIXELS, bg_y % TILE_HEIGHT_IN_PIXELS);
+        let subpixel = sub_y * TILE_WIDTH_IN_PIXELS + sub_x;
+
+        // Get our current pixel's color number from its tile, then map
+        // that to according to the current palette, and write it to
+        // the screen buffer.
+        let cnum = pixel_color_num_in_tile(tile, subpixel);
+        let color = palette[cnum as usize];
+        color
+    }
+
+    fn tile_address_mode(&self) -> TileAddressMode {
         match utils::bit_set(self.read_reg(reg::LCDC), 4) {
-            false => Self::tile_at_signed_addr,
-            true => Self::tile_at_unsigned_addr,
+            false => TileAddressMode::Signed,
+            true => TileAddressMode::Unsigned,
         }
     }
 }
@@ -571,7 +612,7 @@ mod tests {
         let mut cpu = crate::CPU::new();
         cpu.stop();
         // First enable LCD power
-        cpu.mmu.store8(crate::io::lcd::reg::LCDC, 0x80);
+        cpu.mmu.store8_unchecked(crate::io::lcd::reg::LCDC, 0x80);
         assert_eq!(cpu.mmu.io.lcd.mode(), 0);
         // Simulate 144 lines before VBlank
         for _ in 0..144 {

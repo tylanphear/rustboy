@@ -1,4 +1,4 @@
-use std::ops::ControlFlow;
+use std::{ops::ControlFlow, sync::atomic::AtomicUsize};
 
 use glow::HasContext;
 use imgui::Context;
@@ -160,7 +160,6 @@ pub fn main_loop<H, E, R>(
         let draw_data = imgui.render();
         unsafe { renderer.gl_context().clear(glow::COLOR_BUFFER_BIT) };
         renderer.render(draw_data).unwrap();
-
         window.gl_swap_window();
     }
 }
