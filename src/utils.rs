@@ -165,14 +165,19 @@ impl<const S: usize, const L: usize> BoundedLog<S, L> {
 
 pub fn spin_sleep(duration: std::time::Duration) {
     // Trust std::thread::sleep within 125 micros
-    let earlier = std::time::Instant::now();
-    let duration_to_sleep = duration - std::time::Duration::from_micros(125);
-    std::thread::sleep(duration_to_sleep);
+    let sleep_time_elapsed = {
+        let earlier = std::time::Instant::now();
+        if let Some(duration_to_sleep) =
+            duration.checked_sub(std::time::Duration::from_micros(125))
+        {
+            std::thread::sleep(duration_to_sleep);
+        }
+        std::time::Instant::now().duration_since(earlier)
+    };
 
     // Now that we know the actual amount of time we slept, spin for the
     // remainder time, if any.
-    let actual_time_elapsed = std::time::Instant::now().duration_since(earlier);
-    let mut remainder = duration.saturating_sub(actual_time_elapsed);
+    let mut remainder = duration.saturating_sub(sleep_time_elapsed);
     while !remainder.is_zero() {
         let before = std::time::Instant::now();
         std::thread::yield_now();
