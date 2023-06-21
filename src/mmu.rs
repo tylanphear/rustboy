@@ -1,6 +1,8 @@
+use serde::{Deserialize, Serialize};
+
 use crate::cart::Cartridge;
 use crate::io::IOController;
-use crate::utils;
+use crate::utils::mem::Mem;
 use crate::{cpu, io::lcd};
 
 mod regs {
@@ -24,7 +26,7 @@ pub const NUM_OAM_CLOCKS: u16 = 160;
 // 0xFFFF          | IE     | Interrupt Enable register
 
 #[allow(non_snake_case)]
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MMU {
     bios: Mem<{ 0x0100 - 0x0000 }>,
     // vram: Mem<{ 0xA000 - 0x8000 }>,
@@ -36,7 +38,7 @@ pub struct MMU {
     iflags: u8,
     ie: u8,
 
-    cartridge: Option<Cartridge>,
+    pub(crate) cartridge: Option<Cartridge>,
     bios_enabled: bool,
 
     oam_base_addr: u16,
@@ -62,13 +64,17 @@ impl MMU {
 
     pub fn load_bios(&mut self, data: &[u8]) {
         assert!(data.len() == 0x100, "bios must be exactly 0x100 bytes long");
-        self.bios.0.copy_from_slice(&data);
+        self.bios.copy_from_slice(data);
         self.bios_enabled = true;
     }
 
     pub fn load_cart(&mut self, data: Vec<u8>) {
         let cart = Cartridge::new(data);
         self.cartridge = Some(cart);
+    }
+
+    pub fn cart(&self) -> &Cartridge {
+        self.cartridge.as_ref().unwrap()
     }
 
     pub fn reset(&mut self) {
@@ -78,6 +84,9 @@ impl MMU {
         self.io.reset();
         self.hram.clear();
         self.bios_enabled = true;
+        if let Some(cart) = &mut self.cartridge {
+            cart.reset();
+        }
     }
 
     pub fn tick(&mut self) {
@@ -132,6 +141,7 @@ impl MMU {
         }
     }
 
+    #[inline]
     pub fn load8(&self, address: u16) -> u8 {
         self.load8_unchecked(address)
     }
@@ -142,6 +152,7 @@ impl MMU {
         u16::from_le_bytes([byte1, byte2])
     }
 
+    #[inline]
     pub fn store8(&mut self, address: u16, val: u8) {
         // Only HRAM is writeable during OAM DMA
         if self.oam_clocks_left > 0 {
@@ -174,7 +185,7 @@ impl MMU {
             // | OAM    | Object Attribute Table
             0xFE00..=0xFE9F => self.io.lcd.store(address, val),
             // | UNUSED | Ignored/empty (mostly)
-            0xFEA0..=0xFEFF => return,
+            0xFEA0..=0xFEFF => (),
             cpu::regs::IF => self.iflags = val | 0b11100000,
             regs::BIOS_ROM_DISABLE => if val & 0x1 != 0 {
                 self.bios_enabled = false;
@@ -187,7 +198,7 @@ impl MMU {
             // | IO     | mem-mapped I/O registers
             0xFF00..=0xFF4B => self.io.store(address, val),
             // | UNUSED | Ignored/empty (mostly)
-            0xFF4C..=0xFF7F => return,
+            0xFF4C..=0xFF7F => (),
             // | HRAM   | Internal CPU RAM
             0xFF80..=0xFFFE => self.hram[address - 0xFF80] = val,
             // | IE     | Interrupt Enable register
@@ -208,9 +219,7 @@ impl MMU {
             address: u16,
             len: usize,
         ) -> &[u8] {
-            let adjusted_addr = (address - start) as usize;
-            let len_to_load = std::cmp::min(mem.size() - adjusted_addr, len);
-            &mem.0[adjusted_addr..][..len_to_load]
+            mem.safe_slice(address - start, len)
         }
         match address {
             // | BIOS   | Bootstrap program (when enabled)
@@ -242,50 +251,5 @@ impl MMU {
             // | IE     | Interrupt Enable register
             0xFFFF => &[],
         }
-    }
-}
-
-#[derive(Debug)]
-pub struct Mem<const SIZE: usize>(Box<[u8; SIZE]>);
-impl<const SIZE: usize> Default for Mem<SIZE> {
-    fn default() -> Self {
-        Mem(Box::new([0; SIZE]))
-    }
-}
-impl<const SIZE: usize> Mem<SIZE> {
-    pub fn clear(&mut self) {
-        *self.0.as_mut() = [0; SIZE];
-    }
-
-    pub fn size(&self) -> usize {
-        SIZE
-    }
-
-    pub fn as_slice(&self) -> &[u8] {
-        self.0.as_slice()
-    }
-
-    pub fn slice(&self, addr: u16, n: usize) -> &[u8] {
-        let start = addr as usize;
-        &self.0[start..start + n]
-    }
-
-    pub fn copy_from_slice(&mut self, data: &[u8]) {
-        assert!(data.len() <= self.size());
-        self.0.copy_from_slice(data);
-    }
-}
-
-impl<const S: usize> std::ops::Index<u16> for Mem<S> {
-    type Output = u8;
-
-    fn index(&self, index: u16) -> &Self::Output {
-        &self.0[index as usize]
-    }
-}
-
-impl<const S: usize> std::ops::IndexMut<u16> for Mem<S> {
-    fn index_mut(&mut self, index: u16) -> &mut Self::Output {
-        &mut self.0[index as usize]
     }
 }

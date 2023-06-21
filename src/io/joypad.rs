@@ -1,4 +1,4 @@
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Joypad {
     state: u8,
     select: u8,
@@ -27,6 +27,7 @@ mod keys {
     pub const A:      u8 = 0b0000_0001;
 }
 pub use keys::*;
+use serde::{Deserialize, Serialize};
 
 impl Joypad {
     pub fn new() -> Self {
@@ -48,15 +49,13 @@ impl Joypad {
 
     pub fn load(&self, address: u16) -> u8 {
         assert_eq!(address, 0xFF00);
-        let action_buttons = (self.state & 0b0000_1111) >> 0;
-        let dir_buttons = (self.state & 0b1111_0000) >> 4;
+        let buttons = (self.state >> 0) & 0b1111;
+        let dpad = (self.state >> 4) & 0b1111;
         match self.select {
             0b11 => 0b1111_1111,
-            0b10 => 0b1100_0000 | self.select << 4 | dir_buttons,
-            0b01 => 0b1100_0000 | self.select << 4 | action_buttons,
-            0b00 => {
-                0b1100_0000 | self.select << 4 | dir_buttons | action_buttons
-            }
+            0b10 => 0b1100_0000 | self.select << 4 | dpad,
+            0b01 => 0b1100_0000 | self.select << 4 | buttons,
+            0b00 => 0b1100_0000 | self.select << 4 | dpad | buttons,
             _ => unreachable!(),
         }
     }

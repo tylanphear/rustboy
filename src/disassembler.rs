@@ -17,24 +17,6 @@ impl Inst {
     }
 }
 
-pub struct InstIter<'a> {
-    buffer: &'a [u8],
-    position: usize,
-}
-
-impl<'a> InstIter<'a> {
-    pub fn new(buffer: &'a [u8]) -> Self {
-        InstIter {
-            buffer,
-            position: 0,
-        }
-    }
-
-    fn at(&self, offset: usize) -> u8 {
-        self.buffer[self.position + offset]
-    }
-}
-
 pub fn iterate_insts(buffer: &[u8]) -> InstIter<'_> {
     InstIter::new(buffer)
 }
@@ -55,6 +37,24 @@ pub fn insts_til_unconditional_jump(
         }
         Some(inst)
     })
+}
+
+pub struct InstIter<'a> {
+    buffer: &'a [u8],
+    position: usize,
+}
+
+impl<'a> InstIter<'a> {
+    pub fn new(buffer: &'a [u8]) -> Self {
+        InstIter {
+            buffer,
+            position: 0,
+        }
+    }
+
+    fn at(&self, offset: usize) -> u8 {
+        self.buffer[self.position + offset]
+    }
 }
 
 impl<'a> Iterator for InstIter<'a> {

@@ -1,4 +1,4 @@
-use crate::debug_break;
+use serde::{Deserialize, Serialize};
 
 pub mod regs {
     pub const DIV: u16 = 0xFF04;
@@ -7,7 +7,7 @@ pub mod regs {
     pub const TAC: u16 = 0xFF07;
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Timer {
     clock: u16,
     tima: u8,
@@ -71,8 +71,10 @@ impl Timer {
             _ => unreachable!(),
         }
     }
+}
 
-    pub fn dump<W: std::fmt::Write>(&self, out: &mut W) -> std::fmt::Result {
+impl crate::utils::Dump for Timer {
+    fn dump<W: std::fmt::Write>(&self, out: &mut W) -> std::fmt::Result {
         writeln!(
             out,
             "DIV :  {:02X} ({:04X})",

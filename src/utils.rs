@@ -1,3 +1,7 @@
+use serde::{Deserialize, Serialize};
+
+pub mod mem;
+
 pub mod constants {
     pub const EIGHT_K: usize = 0x2000;
     pub const SIXTEEN_K: usize = 0x4000;
@@ -5,14 +9,22 @@ pub mod constants {
     pub const SIXTY_FOUR_K: usize = 0x10000;
 }
 
+#[inline]
 pub(crate) fn get_bit(byte: u8, idx: u8) -> u8 {
     (byte & (1 << idx)) >> idx
 }
 
+#[inline]
 pub(crate) fn bit_set(byte: u8, idx: u8) -> bool {
     get_bit(byte, idx) != 0
 }
 
+#[inline]
+pub(crate) fn lo_bits_of(x: usize, n: usize) -> usize {
+    x & ((1 << n) - 1)
+}
+
+#[inline]
 pub(crate) fn set_bit(byte: u8, idx: u8, flag: u8) -> u8 {
     let flag_bool = flag != 0;
     let flag_mask = -(flag_bool as i8) as u8;
@@ -20,20 +32,18 @@ pub(crate) fn set_bit(byte: u8, idx: u8, flag: u8) -> u8 {
     (byte & !bit_mask) | (flag_mask & bit_mask)
 }
 
-pub(crate) fn wrapping_add(x: usize, y: usize, bound: usize) -> usize {
-    if x + y < bound {
-        x + y
+#[inline]
+pub(crate) fn wrapping_add(a: usize, b: usize, bound: usize) -> usize {
+    if a + b >= bound {
+        (a + b) % bound
     } else {
-        (x + y) % bound
+        a + b
     }
 }
 
-pub(crate) fn wrapping_sub(x: usize, y: usize, bound: usize) -> usize {
-    if x < y {
-        bound - (y - x)
-    } else {
-        x - y
-    }
+#[inline]
+pub(crate) fn round_to_nearest_multiple_of(a: usize, n: usize) -> usize {
+    ((a + (n - 1)) / n) * n
 }
 
 pub(crate) fn disp_chunks(
@@ -41,7 +51,7 @@ pub(crate) fn disp_chunks(
     start: usize,
     chunk_size: usize,
 ) -> String {
-    let mut disp = format!("       ");
+    let mut disp = String::from("       ");
     for idx in 0..chunk_size {
         disp.push_str(&format!("{:02X}  ", idx));
     }
@@ -58,7 +68,7 @@ pub(crate) fn disp_chunks(
     disp
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Reg16([u8; 2]);
 
 impl Reg16 {
@@ -88,7 +98,7 @@ impl std::ops::IndexMut<usize> for Reg16 {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Regs {
     //                | 15 .. 8   | 7 .. 0    |
     pub af: Reg16, // | A (af[1]) | F (af[0]) |
@@ -164,22 +174,19 @@ impl<const S: usize, const L: usize> BoundedLog<S, L> {
 }
 
 pub fn spin_sleep(duration: std::time::Duration) {
+    let start = std::time::Instant::now();
     // Trust std::thread::sleep within 125 micros
-    let sleep_time_elapsed = {
-        let earlier = std::time::Instant::now();
-        std::thread::sleep(
-            duration.saturating_sub(std::time::Duration::from_micros(125)),
-        );
-        std::time::Instant::now().duration_since(earlier)
-    };
+    std::thread::sleep(
+        duration.saturating_sub(std::time::Duration::from_micros(125)),
+    );
 
-    // Now that we know the actual amount of time we slept, spin for the
+    // Now that we've slept for duration - 125 micros, busy wait for the
     // remainder time, if any.
-    let mut remainder = duration.saturating_sub(sleep_time_elapsed);
-    while !remainder.is_zero() {
-        let before = std::time::Instant::now();
+    while start.elapsed() < duration {
         std::thread::yield_now();
-        let elapsed = std::time::Instant::now().duration_since(before);
-        remainder = remainder.saturating_sub(elapsed);
     }
+}
+
+pub trait Dump {
+    fn dump<W: std::fmt::Write>(&self, out: &mut W) -> std::fmt::Result;
 }

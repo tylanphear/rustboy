@@ -1,23 +1,13 @@
-use crate::utils::constants::{SIXTEEN_K, THIRTY_TWO_K};
+use serde::{Deserialize, Serialize};
 
-const ROM_BANK_SIZE: usize = SIXTEEN_K;
+mod mappers;
 
-#[derive(Debug)]
+use crate::utils::constants::{EIGHT_K, THIRTY_TWO_K};
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Cartridge {
     data: Vec<u8>,
     mbc: MBC,
-}
-
-#[derive(Debug, Default)]
-enum MBC {
-    #[default]
-    None,
-    MBC1 {
-        ram_enable: bool,
-        mode: u8,
-        rom_bank_lower5: u8,
-        ram_or_rom_upper2: u8,
-    },
 }
 
 impl Cartridge {
@@ -26,95 +16,120 @@ impl Cartridge {
             data.len() >= THIRTY_TWO_K,
             "cart must be at least 32K bytes long"
         );
-        let type_ = data[0x147];
-        let mbc = match type_ {
-            0 => MBC::None,
-            1 => MBC::MBC1 {
-                ram_enable: false,
-                mode: 0,
-                rom_bank_lower5: 0,
-                ram_or_rom_upper2: 0,
-            },
-            _ => todo!("cartridge type {type_} unsupported"),
+        let mut this = Cartridge {
+            data,
+            mbc: MBC::None,
         };
-        Cartridge { data, mbc }
+        this.mbc = match this.type_() {
+            00 => MBC::None,
+            01 => MBC::MBC1(mappers::MBC1::default()),
+            03 => MBC::MBC3(mappers::MBC3::default()),
+            19 => MBC::MBC5(mappers::MBC5::default()),
+            type_ => todo!("cartridge type {type_} unsupported"),
+        };
+        this
     }
 
-    pub fn store(&mut self, address: u16, val: u8) {
-        match self.mbc {
+    pub fn reset(&mut self) {
+        match &mut self.mbc {
             MBC::None => {}
-            MBC::MBC1 {
-                ref mut ram_enable,
-                ref mut rom_bank_lower5,
-                ref mut ram_or_rom_upper2,
-                ref mut mode,
-            } => match address {
-                // RAM Enable
-                0x0000..=0x1FFF => {
-                    *ram_enable = (val & 0xF) == 0xA;
-                }
-                // ROM Bank (lower)
-                0x2000..=0x3FFF => {
-                    // Take the lower 5 bits -- if the result is 0, offset by 1
-                    // (mapping 0x00 to 0x01, 0x20 to 0x21, etc.)
-                    *rom_bank_lower5 = val & 0x1F + (val & 0x1F == 0) as u8;
-                }
-                // RAM Bank (or upper bits of ROM Bank)
-                0x4000..=0x5FFF => {
-                    *ram_or_rom_upper2 = val & 0x3;
-                }
-                // ROM/RAM Mode
-                0x6000..=0x7FFF => {
-                    *mode = val & 0x1;
-                    return;
-                }
-                0xA000..=0xBFFF => {
-                    todo!("properly implement SRAM");
-                }
-                _ => unreachable!(
-                    "Store outside of MBC range? ({val:02X} to {address:04X})"
-                ),
-            },
+            MBC::MBC1(mbc) => mbc.reset(),
+            MBC::MBC3(mbc) => mbc.reset(),
+            MBC::MBC5(mbc) => mbc.reset(),
         }
     }
 
-    fn load_addr_to_offset(&self, address: u16) -> usize {
-        match self.mbc {
+    fn addr_to_offset(&self, address: u16) -> usize {
+        match &self.mbc {
             MBC::None => address as usize,
-            MBC::MBC1 {
-                rom_bank_lower5,
-                ram_or_rom_upper2,
-                mode,
-                ..
-            } => match address {
-                0x0000..=0x3FFF => address as usize,
-                0x4000..=0x7FFF => {
-                    let rom_bank_num =
-                        rom_bank_lower5 | (ram_or_rom_upper2 << 5);
-                    (rom_bank_num as usize) * ROM_BANK_SIZE
-                        + (address - 0x4000) as usize
-                }
-                0xA000..=0xBFFF if mode == 0x1 => {
-                    todo!("properly implement SRAM");
-                    let rom_bank_num =
-                        rom_bank_lower5 | (ram_or_rom_upper2 << 5);
-                    (rom_bank_num as usize) * ROM_BANK_SIZE
-                        + (address - 0x4000) as usize
-                }
-                _ => unreachable!(),
-            },
+            MBC::MBC1(mbc) => mbc.addr_to_offset(address),
+            MBC::MBC3(mbc) => mbc.addr_to_offset(address),
+            MBC::MBC5(mbc) => mbc.addr_to_offset(address),
+        }
+    }
+
+    pub fn store(&mut self, address: u16, val: u8) {
+        match &mut self.mbc {
+            MBC::None => {}
+            MBC::MBC1(mbc) => mbc.store(address, val),
+            MBC::MBC3(mbc) => mbc.store(address, val),
+            MBC::MBC5(mbc) => mbc.store(address, val),
         }
     }
 
     pub fn load(&self, address: u16) -> u8 {
-        assert!(address < 0x8000, "MBC only handles ROM-area loads");
-        self.data[self.load_addr_to_offset(address)]
+        match &self.mbc {
+            MBC::None => self.data[address as usize],
+            MBC::MBC1(mbc) => mbc.load(address, &self.data),
+            MBC::MBC3(mbc) => mbc.load(address, &self.data),
+            MBC::MBC5(mbc) => mbc.load(address, &self.data),
+        }
     }
 
     pub fn block_load(&self, address: u16, len: usize) -> &[u8] {
         assert!(address < 0x8000, "MBC only handles ROM-area loads");
-        let offset = self.load_addr_to_offset(address);
+        // TODO move block load to mbc interface
+        let offset = self.addr_to_offset(address);
         let len_to_load = std::cmp::min(self.data.len() - offset, len);
         &self.data[offset..][..len_to_load]
+    }
+
+    pub fn name(&self) -> String {
+        let bytes = self.data[0x134..]
+            .iter()
+            .copied()
+            .take_while(|b| *b != b'\0');
+        String::from_utf8(bytes.collect()).unwrap()
+    }
+
+    pub fn type_(&self) -> u8 {
+        self.data[0x147]
+    }
+
+    pub fn rom_size(&self) -> usize {
+        THIRTY_TWO_K * (1usize << self.data[0x148])
+    }
+
+    pub fn ram_size(&self) -> usize {
+        match self.data[0x149] {
+            0x00 => 0,
+            0x01 => unreachable!("unused"),
+            0x02 => EIGHT_K,
+            0x03 => 4 * EIGHT_K,
+            0x04 => 16 * EIGHT_K,
+            0x05 => 8 * EIGHT_K,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl crate::utils::Dump for Cartridge {
+    fn dump<W: std::fmt::Write>(&self, out: &mut W) -> std::fmt::Result {
+        writeln!(out, "Name: {}", self.name())?;
+        writeln!(out, "Type: {:02X}", self.type_())?;
+        writeln!(out, "ROM Size: {:X}", self.rom_size())?;
+        writeln!(out, "RAM Size: {:X}", self.ram_size())?;
+        self.mbc.dump(out)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+enum MBC {
+    #[default]
+    None,
+    MBC1(mappers::MBC1),
+    MBC3(mappers::MBC3),
+    MBC5(mappers::MBC5),
+}
+
+impl crate::utils::Dump for MBC {
+    fn dump<W: std::fmt::Write>(&self, out: &mut W) -> std::fmt::Result {
+        match self {
+            MBC::None => writeln!(out, "No MBC"),
+            MBC::MBC1(mbc) => mbc.dump(out),
+            MBC::MBC3(mbc) => mbc.dump(out),
+            MBC::MBC5(mbc) => mbc.dump(out),
+        }
     }
 }

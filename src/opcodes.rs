@@ -43,6 +43,27 @@ impl Op {
     }
 }
 
+impl serde::Serialize for &'static Op {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let base = &OPS as *const _ as usize;
+        let addr = *self as *const _ as usize;
+        serializer
+            .serialize_u8(((addr - base) / std::mem::size_of::<Op>()) as u8)
+    }
+}
+
+impl<'a> serde::Deserialize<'a> for &'static Op {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'a>,
+    {
+        u8::deserialize(deserializer).map(|byte| &OPS[byte as usize])
+    }
+}
+
 pub mod trap {
     pub const TODO: u8 = 0;
     pub const NOT_EXISTS: u8 = 1;

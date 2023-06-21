@@ -3,9 +3,10 @@ pub mod lcd;
 pub mod timer;
 use joypad::Joypad;
 use lcd::LCDController;
+use serde::{Deserialize, Serialize};
 use timer::Timer;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct IOController {
     pub lcd: LCDController,
     pub timer: Timer,
@@ -28,14 +29,14 @@ impl IOController {
             0xFF01..=0xFF02 =>
             /* todo: serial */
             {
-                crate::debug_log!("todo: serial (load {address:04X})");
+                //crate::debug_log!("todo: serial (load {address:04X})");
                 0
             }
             0xFF40..=0xFF4B => self.lcd.load(address),
             0xFF10..=0xFF3F =>
             /* sound controller */
             {
-                crate::debug_log!("todo: sound (load {address:04X})");
+                //crate::debug_log!("todo: sound (load {address:04X})");
                 0
             }
             0xFF04..=0xFF07 => self.timer.load(address),
@@ -54,13 +55,13 @@ impl IOController {
             0xFF10..=0xFF3F =>
             /* sound controller */
             {
-                crate::debug_log!("todo: sound (store {address:04X})");
+                //crate::debug_log!("todo: sound (store {address:04X})");
                 return;
             }
             0xFF01..=0xFF02 =>
             /* todo: serial */
             {
-                crate::debug_log!("todo: serial (store {address:04X})");
+                //crate::debug_log!("todo: serial (store {address:04X})");
                 return;
             }
             0xFF04..=0xFF07 => self.timer.store(address, val),

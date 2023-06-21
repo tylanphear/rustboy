@@ -1,10 +1,15 @@
-use std::{ops::ControlFlow, sync::atomic::AtomicUsize};
+use std::ops::ControlFlow;
 
 use glow::HasContext;
 use imgui::Context;
 use imgui_glow_renderer::{AutoRenderer, TextureMap};
 use imgui_sdl2_support::SdlPlatform;
 use sdl2::video::{GLProfile, Window};
+
+const FRAMES_PER_SECOND: u64 = 60;
+const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
+const SECONDS_PER_FRAME: std::time::Duration =
+    std::time::Duration::from_nanos(NANOSECONDS_PER_SECOND / FRAMES_PER_SECOND);
 
 fn glow_context(window: &Window) -> glow::Context {
     unsafe {
@@ -44,6 +49,45 @@ impl From<sdl2::event::Event> for Event {
     }
 }
 
+pub struct ScreenBuffer {
+    gl_pixels: Box<[u8; 160 * 144 * 4]>,
+}
+
+impl ScreenBuffer {
+    pub fn new() -> Self {
+        Self {
+            gl_pixels: Box::new([0; 160 * 144 * 4]),
+        }
+    }
+}
+
+impl crate::lcd::ExternalScreenBuffer for ScreenBuffer {
+    const NUM_RAW_PIXELS: usize = 4;
+
+    #[inline]
+    #[rustfmt::skip]
+    fn write_pixel(&mut self, idx: usize, raw_pixel: u8) {
+        use crate::lcd::colors;
+        let luminosity = match raw_pixel & 0x3 {
+            colors::WHITE => 0xFC,
+            colors::LGRAY => 0xD3,
+            colors::DGRAY => 0x5A,
+            colors::BLACK => 0x00,
+            _ => unreachable!(),
+        };
+        /* R */ self.gl_pixels[4 * idx + 0] = luminosity;
+        /* G */ self.gl_pixels[4 * idx + 1] = luminosity;
+        /* B */ self.gl_pixels[4 * idx + 2] = luminosity;
+        /* A */ self.gl_pixels[4 * idx + 3] = 0xFF;
+    }
+
+    #[inline]
+    fn slice(&self, start: usize, end: usize) -> &[u8] {
+        &self.gl_pixels.as_slice()
+            [start * Self::NUM_RAW_PIXELS..end * Self::NUM_RAW_PIXELS]
+    }
+}
+
 pub fn main_loop<H, E, R>(
     mut handle_event: H,
     mut draw_ui: E,
@@ -51,7 +95,7 @@ pub fn main_loop<H, E, R>(
 ) where
     H: FnMut(Event) -> ControlFlow<()>,
     E: FnMut(&imgui::Ui, imgui::TextureId),
-    R: FnMut(&mut crate::io::lcd::ScreenBuffer),
+    R: FnMut(&mut ScreenBuffer) -> crate::io::lcd::RenderUpdate,
 {
     let sdl = sdl2::init().expect("couldn't initialize SDL?");
     let video = sdl.video().expect("couldn't get SDL video subsystem?");
@@ -102,15 +146,15 @@ pub fn main_loop<H, E, R>(
             160,
             144,
             0,
-            RGB,
+            RGBA,
             UNSIGNED_BYTE,
             None,
         );
+        gl.bind_texture(TEXTURE_2D, None);
         renderer.texture_map_mut().register(id).unwrap()
     };
 
-    let mut raw_frame_pixels = Box::new([0u8; 160 * 144]);
-    let mut gl_frame_pixels = vec![0; 160 * 144 * 3];
+    let mut screen_buffer = ScreenBuffer::new();
     'main: loop {
         for event in event_pump.poll_iter() {
             platform.handle_event(&mut imgui, &event);
@@ -126,40 +170,40 @@ pub fn main_loop<H, E, R>(
         let ui = imgui.new_frame();
         draw_ui(ui, framebuffer_tex_id);
 
-        render_frame(raw_frame_pixels.as_mut());
-        for (idx, raw_pixel) in raw_frame_pixels.iter().enumerate() {
-            let gl_pixel = match raw_pixel {
-                //     R     G     B
-                0 => [0xFC, 0xFC, 0xFC], // WHITE
-                1 => [0xD3, 0xD3, 0xD3], // LIGHT GRAY
-                2 => [0x5A, 0x5A, 0x5A], // DARK GRAY
-                3 => [0x00, 0x00, 0x00], // BLACK
-                _ => unreachable!(),
-            };
-            gl_frame_pixels[3 * idx + 0] = gl_pixel[0];
-            gl_frame_pixels[3 * idx + 1] = gl_pixel[1];
-            gl_frame_pixels[3 * idx + 2] = gl_pixel[2];
-        }
-        unsafe {
-            use glow::*;
-            let gl = renderer.gl_context();
-            let frame = renderer
-                .texture_map()
-                .gl_texture(framebuffer_tex_id)
-                .unwrap();
-            gl.bind_texture(TEXTURE_2D, Some(frame));
-            gl.tex_image_2d(
-                TEXTURE_2D,
-                0,
-                RGBA as i32,
-                160,
-                144,
-                0,
-                RGB,
-                UNSIGNED_BYTE,
-                Some(&gl_frame_pixels),
-            );
-            gl.bind_texture(TEXTURE_2D, None);
+        let update = render_frame(&mut screen_buffer);
+        if update.num_scanlines() > 0 {
+            unsafe {
+                use glow::*;
+                let gl = renderer.gl_context();
+                let frame = renderer
+                    .texture_map()
+                    .gl_texture(framebuffer_tex_id)
+                    .unwrap();
+                gl.bind_texture(TEXTURE_2D, Some(frame));
+                gl.tex_sub_image_2d(
+                    TEXTURE_2D,
+                    0,
+                    0,
+                    update.start_scanline as i32,
+                    crate::io::lcd::SCREEN_WIDTH as i32,
+                    update.num_scanlines() as i32,
+                    RGBA,
+                    UNSIGNED_BYTE,
+                    PixelUnpackData::Slice(update.section(&screen_buffer)),
+                );
+                //gl.tex_image_2d(
+                //    TEXTURE_2D,
+                //    0,
+                //    RGBA as i32,
+                //    160,
+                //    144,
+                //    0,
+                //    RGBA,
+                //    UNSIGNED_BYTE,
+                //    Some(screen_buffer.gl_pixels.as_slice()),
+                //);
+                gl.bind_texture(TEXTURE_2D, None);
+            }
         }
 
         let draw_data = imgui.render();
