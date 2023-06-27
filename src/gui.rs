@@ -6,11 +6,6 @@ use imgui_glow_renderer::{AutoRenderer, TextureMap};
 use imgui_sdl2_support::SdlPlatform;
 use sdl2::video::{GLProfile, Window};
 
-const FRAMES_PER_SECOND: u64 = 60;
-const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
-const SECONDS_PER_FRAME: std::time::Duration =
-    std::time::Duration::from_nanos(NANOSECONDS_PER_SECOND / FRAMES_PER_SECOND);
-
 fn glow_context(window: &Window) -> glow::Context {
     unsafe {
         glow::Context::from_loader_function(|s| {
@@ -61,13 +56,13 @@ impl ScreenBuffer {
     }
 }
 
-impl crate::lcd::ExternalScreenBuffer for ScreenBuffer {
+impl crate::ppu::ExternalScreenBuffer for ScreenBuffer {
     const NUM_RAW_PIXELS: usize = 4;
 
     #[inline]
     #[rustfmt::skip]
     fn write_pixel(&mut self, idx: usize, raw_pixel: u8) {
-        use crate::lcd::colors;
+        use crate::ppu::colors;
         let luminosity = match raw_pixel & 0x3 {
             colors::WHITE => 0xFC,
             colors::LGRAY => 0xD3,
@@ -95,7 +90,7 @@ pub fn main_loop<H, E, R>(
 ) where
     H: FnMut(Event) -> ControlFlow<()>,
     E: FnMut(&imgui::Ui, imgui::TextureId),
-    R: FnMut(&mut ScreenBuffer) -> crate::io::lcd::RenderUpdate,
+    R: FnMut(&mut ScreenBuffer) -> crate::io::ppu::RenderUpdate,
 {
     let sdl = sdl2::init().expect("couldn't initialize SDL?");
     let video = sdl.video().expect("couldn't get SDL video subsystem?");
@@ -185,7 +180,7 @@ pub fn main_loop<H, E, R>(
                     0,
                     0,
                     update.start_scanline as i32,
-                    crate::io::lcd::SCREEN_WIDTH as i32,
+                    crate::io::ppu::SCREEN_WIDTH as i32,
                     update.num_scanlines() as i32,
                     RGBA,
                     UNSIGNED_BYTE,

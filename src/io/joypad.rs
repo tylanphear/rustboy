@@ -34,6 +34,10 @@ impl Joypad {
         Self::default()
     }
 
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
     pub fn up(&mut self, key: u8) {
         self.state |= key;
     }
@@ -43,8 +47,10 @@ impl Joypad {
         self.need_interrupt = true;
     }
 
-    pub fn tick(&mut self) -> bool {
-        std::mem::take(&mut self.need_interrupt)
+    pub fn tick(&mut self, interrupts: &mut crate::io::Interrupts) {
+        if std::mem::take(&mut self.need_interrupt) {
+            interrupts.request_joypad();
+        }
     }
 
     pub fn load(&self, address: u16) -> u8 {

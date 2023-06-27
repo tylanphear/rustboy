@@ -20,7 +20,7 @@ impl Timer {
         *self = Default::default();
     }
 
-    pub fn tick(&mut self) -> bool {
+    pub fn tick(&mut self, interrupts: &mut crate::io::Interrupts) {
         self.clock = self.clock.wrapping_add(4);
 
         let mut need_interrupt = false;
@@ -28,14 +28,13 @@ impl Timer {
             if self.clock % self.clock_rate() == 0 {
                 let (new_tima, overflowed) = self.tima.overflowing_add(1);
                 if overflowed {
-                    need_interrupt = true;
+                    interrupts.request_timer();
                     self.tima = self.tma;
                 } else {
                     self.tima = new_tima;
                 }
             }
         }
-        need_interrupt
     }
 
     pub fn load(&self, address: u16) -> u8 {

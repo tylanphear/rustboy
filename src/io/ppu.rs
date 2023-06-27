@@ -84,6 +84,10 @@ pub mod reg {
     pub const WX  : u16 = 0xFF4B;
 }
 
+// TODO: the following clock count is incorrect -- the controller actually
+// starts in mode 2, and mode 3 is variable-length depending on how long it
+// takes to draw sprites in OAM.
+//
 // Each scanline lasts 456 clocks (114 internal)
 //    4 clocks ( 1 internal) - (Mode 0)
 //   80 clocks (20 internal) - (Mode 2)
@@ -95,7 +99,9 @@ pub mod reg {
 //   - VBlank interrupt is triggered by setting IF flag on cycle after LY=144
 
 const CLOCKS_PER_SCANLINE: u64 = 114;
-const NUM_SCANLINES: u8 = 154;
+const LAST_CLOCK_IN_SCANLINE: u64 = CLOCKS_PER_SCANLINE - 1;
+const NUM_SCANLINES: u64 = 154;
+const LAST_SCANLINE: u64 = NUM_SCANLINES - 1;
 const VRAM_START: u16 = 0x8000;
 const VRAM_END: u16 = VRAM_START + (VRAM_SIZE as u16) - 1;
 const VRAM_SIZE: usize = 0x2000;
@@ -175,17 +181,10 @@ impl LCDController {
     }
 
     pub(crate) fn mode(&self) -> u8 {
-        self.read_reg(reg::STAT) & 0b00000111
+        self.read_reg(reg::STAT) & 0b00000011
     }
 
-    pub fn tick(&mut self) -> (bool, bool) {
-        if !self.lcd_display_enabled() {
-            return (false, false);
-        }
-
-        // Assume we don't need any interrupts, at first.
-        let mut need_vblank_interrupt = false;
-        let mut need_stat_interrupt = false;
+    pub fn tick(&mut self, interrupts: &mut crate::io::Interrupts) {
         let stat_interrupt_on_lyc = utils::bit_set(self.read_reg(reg::STAT), 6);
         let stat_interrupt_on_mode2 =
             utils::bit_set(self.read_reg(reg::STAT), 5);
@@ -194,65 +193,67 @@ impl LCDController {
         let stat_interrupt_on_mode0 =
             utils::bit_set(self.read_reg(reg::STAT), 3);
 
-        self.clock = self.clock.wrapping_add(1);
-
-        // Check for LY == LYC
-        let ly_equals_lyc = self.read_reg(reg::LY) == self.read_reg(reg::LYC);
-        self.write_reg(
-            reg::STAT,
-            (self.read_reg(reg::STAT) & 0b1111_1011)
-                | ((ly_equals_lyc as u8) << 2),
-        );
-
-        // If we've reached the end of our scanline, wrap the internal clock
-        // and advance to the next scanline.
-        if self.clock == CLOCKS_PER_SCANLINE {
-            self.clock = 0;
-            self.write_reg(reg::LY, self.read_reg(reg::LY).wrapping_add(1));
-        }
-
-        let old_stat_signal = self.stat_signal;
-
         // Check our current scanline and set mode accordingly.
-        match self.read_reg(reg::LY) {
+        let ly = self.read_reg(reg::LY);
+        let line = self.clock / CLOCKS_PER_SCANLINE;
+        let clock = self.clock % CLOCKS_PER_SCANLINE;
+        match line {
             // Not in VBlank
-            0..=143 => match self.clock {
-                0 => self.set_mode(0),
-                1 => self.set_mode(2),
-                21 => self.set_mode(3),
-                112 => self.set_mode(0),
+            0..=143 => match clock {
+                0 => self.set_mode(2),
+                20 => self.set_mode(3),
+                63 => {
+                    self.update_screen(line as usize);
+                    self.set_mode(0);
+                }
+                LAST_CLOCK_IN_SCANLINE => self.write_reg(reg::LY, ly + 1),
                 _ => {}
             },
             // VBlank is about to begin
-            144 => match self.clock {
+            144 => match clock {
                 0 => self.set_mode(0),
                 1 => {
                     // VBlank begins -- signal interrupt
                     self.set_mode(1);
-                    need_vblank_interrupt = true;
+                    interrupts.request_vblank();
                 }
+                LAST_CLOCK_IN_SCANLINE => self.write_reg(reg::LY, ly + 1),
                 _ => {}
             },
-            // Last VBlank cycle
-            NUM_SCANLINES => match self.clock {
-                0 => self.set_mode(1),
+            145..=152 => {
+                if clock == LAST_CLOCK_IN_SCANLINE {
+                    self.write_reg(reg::LY, ly + 1);
+                }
+            }
+            // Last VBlank line
+            LAST_SCANLINE => match clock {
                 1 => self.write_reg(reg::LY, 0),
                 _ => {}
             },
             _ => {}
         };
 
-        self.stat_signal = (ly_equals_lyc && stat_interrupt_on_lyc)
-            || (self.mode() == 0 && stat_interrupt_on_mode0)
-            || (self.mode() == 1 && stat_interrupt_on_mode1)
-            || (self.mode() == 2 && stat_interrupt_on_mode2);
+        // Check for LY == LYC
+        let ly_equals_lyc = clock != 0 && ly == self.read_reg(reg::LYC);
+        self.write_reg(
+            reg::STAT,
+            utils::set_bit(self.read_reg(reg::STAT), 2, ly_equals_lyc as u8),
+        );
+
+        let old_stat_signal = self.stat_signal;
+        self.stat_signal =
+            (ly_equals_lyc && stat_interrupt_on_lyc && clock == 1)
+                || (self.mode() == 0 && stat_interrupt_on_mode0)
+                || (self.mode() == 1 && stat_interrupt_on_mode1)
+                || (self.mode() == 2 && stat_interrupt_on_mode2);
         if !old_stat_signal && self.stat_signal {
-            need_stat_interrupt = true;
+            interrupts.request_lcd_stat();
         }
 
-        self.update_screen();
-
-        (need_vblank_interrupt, need_stat_interrupt)
+        self.clock += 1;
+        if self.clock == CLOCKS_PER_SCANLINE * NUM_SCANLINES {
+            self.clock = 0;
+        }
     }
 
     #[inline]
@@ -327,22 +328,19 @@ impl LCDController {
         match address {
             // | VRAM   | Video RAM
             0x8000..=0x9FFF => {
-                let addr = (address - VRAM_START) as usize;
-                let len_to_load = std::cmp::min(VRAM_SIZE - addr, len);
-                self.vram.slice(addr as u16, len_to_load)
+                self.vram.safe_slice((address - VRAM_START) as usize, len)
             }
             // | OAM    | Object Attribute Table
             0xFE00..=0xFE9F => {
-                let addr = (address - OAM_START) as usize;
-                let len_to_load = std::cmp::min(OAM_SIZE - addr, len);
-                self.oam.slice(addr as u16, len_to_load)
+                self.vram.safe_slice((address - OAM_START) as usize, len)
             }
             _ => panic!("unsupported block load!"),
         }
     }
 
-    pub fn clear(&mut self, color: u8) {
-        self.screen.fill(color);
+    pub fn clear_line(&mut self, color: u8, y: usize) {
+        self.screen.as_mut_slice()[y * SCREEN_WIDTH..][..SCREEN_WIDTH]
+            .fill(color)
     }
 
     #[inline]
@@ -350,7 +348,7 @@ impl LCDController {
         const BASE: u16 = TILE_SET_2 + 0x800;
         let tile_offset = (num as i8 as isize) * BYTES_PER_TILE as isize;
         let addr = ((BASE as isize) + tile_offset) as u16;
-        vram.slice(addr - VRAM_START, BYTES_PER_TILE)
+        vram.slice((addr - VRAM_START) as usize, BYTES_PER_TILE)
     }
 
     #[inline]
@@ -358,7 +356,7 @@ impl LCDController {
         const BASE: u16 = TILE_SET_1;
         let tile_offset = num as usize * BYTES_PER_TILE;
         let addr = BASE + tile_offset as u16;
-        vram.slice(addr - VRAM_START, BYTES_PER_TILE)
+        vram.slice((addr - VRAM_START) as usize, BYTES_PER_TILE)
     }
 
     #[inline]
@@ -416,43 +414,39 @@ impl LCDController {
         ]
     }
 
-    pub fn update_screen(&mut self) {
+    // TODO: is inline never actually better here?
+    #[inline(never)]
+    pub fn update_screen(&mut self, scanline: usize) {
         if !self.lcd_display_enabled() {
-            self.clear(colors::WHITE);
-            return;
-        }
-
-        if self.mode() != 3 {
+            self.clear_line(colors::WHITE, scanline);
             return;
         }
 
         let bg_palette = Self::reg_to_palette(self.read_reg(reg::BGP));
 
-        if !self.bg_and_window_enabled() {
-            self.clear(bg_palette[0]);
-            return;
-        }
-
-        let scanline = self.read_reg(reg::LY);
-        if scanline < 144 {
+        if self.bg_and_window_enabled() {
             self.draw_background_line(&bg_palette, scanline);
 
             if self.window_enabled() {
                 self.draw_window_line(&bg_palette, scanline);
             }
+        } else {
+            self.clear_line(bg_palette[0], scanline);
+            return;
+        }
 
-            if self.obj_enabled() {
-                self.draw_oam_line(scanline);
-            }
+        if self.obj_enabled() {
+            self.draw_oam_line(scanline);
         }
     }
 
-    fn draw_background_line(&mut self, bg_palette: &[u8; 4], scanline: u8) {
-        let y = scanline as usize;
+    fn draw_background_line(&mut self, bg_palette: &[u8; 4], scanline: usize) {
+        let y = scanline;
 
-        let bg_tile_map = self
-            .vram
-            .slice(self.bg_tile_map_addr() - VRAM_START, TILE_MAP_SIZE);
+        let bg_tile_map = self.vram.slice(
+            (self.bg_tile_map_addr() - VRAM_START) as usize,
+            TILE_MAP_SIZE,
+        );
         let tile_address_mode = self.tile_address_mode();
         let get_tile = |x: usize, y: usize| {
             let tile_num = bg_tile_map[y * NUM_TILES_IN_X + x];
@@ -470,7 +464,7 @@ impl LCDController {
             self.read_reg(reg::SCX) as usize,
             self.read_reg(reg::SCY) as usize,
         );
-        let scrolled_y = utils::wrapping_add(y, scroll_y, BG_HEIGHT);
+        let scrolled_y = (y + scroll_y) % BG_HEIGHT;
         let tile_y = scrolled_y / TILE_HEIGHT_IN_PIXELS;
         let sub_tile_y = scrolled_y % TILE_HEIGHT_IN_PIXELS;
 
@@ -489,11 +483,12 @@ impl LCDController {
                 bg_palette
                     [pixel_color_num_in_tile(initial_tile, subpixel) as usize];
         }
+
         // Having made sure we handled the first tile, now draw all of the full tiles.
         let (first_x, last_x) =
             (first_tile_pixels, SCREEN_WIDTH - initial_shifted_pixels);
         for x in (first_x..last_x).step_by(TILE_WIDTH_IN_PIXELS) {
-            let scrolled_x = utils::wrapping_add(x, scroll_x, BG_WIDTH);
+            let scrolled_x = (x + scroll_x) % BG_WIDTH;
             let tile_x = scrolled_x / TILE_WIDTH_IN_PIXELS;
             let tile = get_tile(tile_x, tile_y);
             for sub_tile_x in 0..TILE_WIDTH_IN_PIXELS {
@@ -507,8 +502,7 @@ impl LCDController {
         // that case here.
         let remaining_pixels = SCREEN_WIDTH - last_x;
         if remaining_pixels > 0 {
-            let scrolled_remainder_x =
-                utils::wrapping_add(last_x, scroll_x, BG_WIDTH);
+            let scrolled_remainder_x = (last_x + scroll_x) % BG_WIDTH;
             let remainder_tile_x = scrolled_remainder_x / TILE_WIDTH_IN_PIXELS;
             let remainder_tile = get_tile(remainder_tile_x, tile_y);
             for sub_tile_x in 0..remaining_pixels {
@@ -520,15 +514,16 @@ impl LCDController {
         }
     }
 
-    fn draw_window_line(&mut self, bg_palette: &[u8; 4], scanline: u8) {
-        let y = scanline as usize;
+    fn draw_window_line(&mut self, bg_palette: &[u8; 4], scanline: usize) {
+        let y = scanline;
         let win_y = self.read_reg(reg::WY) as usize;
         if y < win_y {
             return;
         }
-        let window_tile_map = self
-            .vram
-            .slice(self.window_tile_map_addr() - VRAM_START, TILE_MAP_SIZE);
+        let window_tile_map = self.vram.slice(
+            (self.window_tile_map_addr() - VRAM_START) as usize,
+            TILE_MAP_SIZE,
+        );
         for x in 0..SCREEN_WIDTH {
             let win_x_plus_7 = self.read_reg(reg::WX) as usize;
             if x + 7 < win_x_plus_7 {
@@ -544,7 +539,7 @@ impl LCDController {
         }
     }
 
-    fn draw_oam_line(&mut self, scanline: u8) {
+    fn draw_oam_line(&mut self, scanline: usize) {
         let obj_size = self.obj_size();
         let obj_palette_0 = Self::reg_to_palette(self.read_reg(reg::OBP0));
         let obj_palette_1 = Self::reg_to_palette(self.read_reg(reg::OBP1));
@@ -569,8 +564,8 @@ impl LCDController {
                 ObjSize::Normal => 8,
                 ObjSize::Large => 16,
             };
-            if y_plus_16 > scanline + 16
-                || scanline + 16 >= y_plus_16 + obj_height
+            if (y_plus_16 as usize) > scanline + 16
+                || scanline + 16 >= (y_plus_16 as usize) + obj_height
             {
                 continue;
             }
@@ -583,7 +578,7 @@ impl LCDController {
                 true => obj_palette_1,
             };
 
-            let tile_y = scanline + 16 - y_plus_16;
+            let tile_y = scanline + 16 - (y_plus_16 as usize);
             let tile_y = match y_flip {
                 false => tile_y,
                 true => obj_height - tile_y - 1,
@@ -595,8 +590,8 @@ impl LCDController {
                         &mut self.screen,
                         Self::tile_at_unsigned_addr(&self.vram, tile_num),
                         &palette,
-                        tile_y as usize,
-                        scanline as usize,
+                        tile_y,
+                        scanline,
                         x_plus_8 as usize,
                         x_flip,
                         bg_takes_priority,
@@ -612,8 +607,8 @@ impl LCDController {
                                 tile_num & 0xFE,
                             ),
                             &palette,
-                            tile_y as usize,
-                            scanline as usize,
+                            tile_y,
+                            scanline,
                             x_plus_8 as usize,
                             x_flip,
                             bg_takes_priority,
@@ -627,8 +622,8 @@ impl LCDController {
                                 tile_num | 0x01,
                             ),
                             &palette,
-                            (tile_y - 8) as usize,
-                            scanline as usize,
+                            tile_y - 8,
+                            scanline,
                             x_plus_8 as usize,
                             x_flip,
                             bg_takes_priority,
@@ -734,7 +729,7 @@ fn color_bit_in_tile(tile: &[u8], n: usize, offset: usize) -> u8 {
     //   03333300            22000110
     // n 01234567          n 89ABCDEF
     let (byte, bit) = ((n / 8) * 2, 7 - (n % 8));
-    utils::get_bit(tile[byte + offset], bit as u8)
+    utils::get_bit(tile[byte + offset], bit)
 }
 
 fn pixel_color_num_in_tile(tile: &[u8], pixel: usize) -> u8 {
@@ -743,6 +738,9 @@ fn pixel_color_num_in_tile(tile: &[u8], pixel: usize) -> u8 {
 
 impl crate::utils::Dump for LCDController {
     fn dump<W: std::fmt::Write>(&self, out: &mut W) -> std::fmt::Result {
+        writeln!(out, "CLOCK0: {0:08}", self.clock)?;
+        writeln!(out, "CLOCK1: {0:08}", self.clock % CLOCKS_PER_SCANLINE)?;
+        writeln!(out, "LINE  : {0:08}", self.clock / CLOCKS_PER_SCANLINE)?;
         writeln!(
             out,
             "LCDC: {0:08b} ({1:04X})",
@@ -755,18 +753,48 @@ impl crate::utils::Dump for LCDController {
             self.load(reg::STAT),
             reg::STAT
         )?;
-        writeln!(out, "SCX : {0:08} ({1:04X})", self.load(reg::SCX), reg::SCX)?;
-        writeln!(out, "SCY : {0:08} ({1:04X})", self.load(reg::SCY), reg::SCY)?;
-        writeln!(out, "LY  : {0:08} ({1:04X})", self.load(reg::LY), reg::LY)?;
-        writeln!(out, "LYC : {0:08} ({1:04X})", self.load(reg::LYC), reg::LYC)?;
+        writeln!(
+            out,
+            "SCX : {0:08} ({1:04X})",
+            self.read_reg(reg::SCX),
+            reg::SCX
+        )?;
+        writeln!(
+            out,
+            "SCY : {0:08} ({1:04X})",
+            self.read_reg(reg::SCY),
+            reg::SCY
+        )?;
+        writeln!(
+            out,
+            "LY  : {0:08} ({1:04X})",
+            self.read_reg(reg::LY),
+            reg::LY
+        )?;
+        writeln!(
+            out,
+            "LYC : {0:08} ({1:04X})",
+            self.read_reg(reg::LYC),
+            reg::LYC
+        )?;
         writeln!(
             out,
             "BGP : {0:08b} ({1:04X})",
             self.load(reg::BGP),
             reg::BGP
         )?;
-        writeln!(out, "WY  : {0:08} ({1:04X})", self.load(reg::WY), reg::WY)?;
-        writeln!(out, "WX  : {0:08} ({1:04X})", self.load(reg::WX), reg::WX)?;
+        writeln!(
+            out,
+            "WY  : {0:08} ({1:04X})",
+            self.read_reg(reg::WY),
+            reg::WY
+        )?;
+        writeln!(
+            out,
+            "WX  : {0:08} ({1:04X})",
+            self.read_reg(reg::WX),
+            reg::WX
+        )?;
         if self.bg_and_window_enabled() {
             writeln!(out, "BG TILE MAP: {0:04X}", self.bg_tile_map_addr())?;
         } else {
@@ -867,7 +895,7 @@ mod tests {
         let mut cpu = crate::CPU::new();
         cpu.stop();
         // First enable LCD power
-        cpu.mmu.store8_unchecked(crate::io::lcd::reg::LCDC, 0x80);
+        cpu.mmu.store8_unchecked(reg::LCDC, 0x80);
         assert_eq!(cpu.mmu.io.lcd.mode(), 0);
         // Simulate 144 lines before VBlank
         for _ in 0..144 {

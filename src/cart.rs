@@ -21,11 +21,11 @@ impl Cartridge {
             mbc: MBC::None,
         };
         this.mbc = match this.type_() {
-            00 => MBC::None,
-            01 => MBC::MBC1(mappers::MBC1::default()),
-            03 => MBC::MBC3(mappers::MBC3::default()),
-            19 => MBC::MBC5(mappers::MBC5::default()),
-            type_ => todo!("cartridge type {type_} unsupported"),
+            0x00 => MBC::None,
+            0x01..=0x03 => MBC::MBC1(mappers::MBC1::default()),
+            0x0F..=0x13 => MBC::MBC3(mappers::MBC3::default()),
+            0x19 => MBC::MBC5(mappers::MBC5::default()),
+            type_ => todo!("cartridge type {type_:02X} unsupported"),
         };
         this
     }
@@ -67,11 +67,16 @@ impl Cartridge {
     }
 
     pub fn block_load(&self, address: u16, len: usize) -> &[u8] {
-        assert!(address < 0x8000, "MBC only handles ROM-area loads");
-        // TODO move block load to mbc interface
-        let offset = self.addr_to_offset(address);
-        let len_to_load = std::cmp::min(self.data.len() - offset, len);
-        &self.data[offset..][..len_to_load]
+        match &self.mbc {
+            MBC::None => {
+                let offset = self.addr_to_offset(address);
+                let len_to_load = std::cmp::min(self.data.len() - offset, len);
+                &self.data[offset..][..len_to_load]
+            }
+            MBC::MBC1(mbc) => mbc.block_load(address, len, &self.data),
+            MBC::MBC3(mbc) => mbc.block_load(address, len, &self.data),
+            MBC::MBC5(mbc) => mbc.block_load(address, len, &self.data),
+        }
     }
 
     pub fn name(&self) -> String {

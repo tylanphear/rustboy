@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::cart::Cartridge;
 use crate::io::IOController;
 use crate::utils::mem::Mem;
-use crate::{cpu, io::lcd};
+use crate::{cpu, io::ppu};
 
 mod regs {
     pub const BIOS_ROM_DISABLE: u16 = 0xFF50;
@@ -43,6 +43,9 @@ pub struct MMU {
 
     oam_base_addr: u16,
     oam_clocks_left: u16,
+
+    #[serde(skip)]
+    watchpoints: std::collections::HashSet<u16>,
 }
 
 impl MMU {
@@ -51,7 +54,7 @@ impl MMU {
             bios: Default::default(),
             ram0: Default::default(),
             ramx: Default::default(),
-            io: IOController::new(),
+            io: Default::default(),
             hram: Default::default(),
             cartridge: None,
             bios_enabled: true,
@@ -59,6 +62,7 @@ impl MMU {
             ie: 0,
             oam_base_addr: 0,
             oam_clocks_left: 0,
+            watchpoints: Default::default(),
         }
     }
 
@@ -87,6 +91,7 @@ impl MMU {
         if let Some(cart) = &mut self.cartridge {
             cart.reset();
         }
+        self.watchpoints.clear();
     }
 
     pub fn tick(&mut self) {
@@ -94,9 +99,6 @@ impl MMU {
             return;
         }
 
-        if self.oam_clocks_left == NUM_OAM_CLOCKS {
-            //crate::debug_log!("starting OAM DMA at {:04X}", self.oam_base_addr);
-        }
         let offset = NUM_OAM_CLOCKS - self.oam_clocks_left;
         let addr = self.oam_base_addr + offset;
         let byte = self.load8_unchecked(addr);
@@ -109,7 +111,7 @@ impl MMU {
         match address {
             cpu::regs::IF => self.iflags,
             regs::BIOS_ROM_DISABLE => 0xE | !self.bios_enabled as u8,
-            lcd::reg::DMA => self.oam_base_addr.to_le_bytes()[0],
+            ppu::reg::DMA => self.oam_base_addr.to_le_bytes()[0],
             // | BIOS   | Bootstrap program (when enabled)
             0x0000..=0x00FF if self.bios_enabled => self.bios[address - 0x0000],
             // | ROM0   | Cartridge ROM
@@ -141,8 +143,34 @@ impl MMU {
         }
     }
 
+    pub fn register_watchpoint(&mut self, address: u16) {
+        self.watchpoints.insert(address);
+    }
+
+    pub fn dump_watchpoints<W: std::fmt::Write>(
+        &self,
+        out: &mut W,
+    ) -> std::fmt::Result {
+        if self.watchpoints.is_empty() {
+            return Ok(());
+        }
+        writeln!(out, "current watchpoints:")?;
+        let sorted_addrs = {
+            let mut keys: Vec<_> = self.watchpoints.iter().collect();
+            keys.sort();
+            keys
+        };
+        for bp in &sorted_addrs {
+            writeln!(out, "{:04X}", bp)?;
+        }
+        Ok(())
+    }
+
     #[inline]
     pub fn load8(&self, address: u16) -> u8 {
+        if self.watchpoints.contains(&address) {
+            crate::debug_break!("watchpoint {address:04X} hit!");
+        }
         self.load8_unchecked(address)
     }
 
@@ -154,6 +182,9 @@ impl MMU {
 
     #[inline]
     pub fn store8(&mut self, address: u16, val: u8) {
+        if self.watchpoints.contains(&address) {
+            crate::debug_break!("watchpoint {address:04X} hit!");
+        }
         // Only HRAM is writeable during OAM DMA
         if self.oam_clocks_left > 0 {
             match address {
@@ -190,7 +221,7 @@ impl MMU {
             regs::BIOS_ROM_DISABLE => if val & 0x1 != 0 {
                 self.bios_enabled = false;
             }
-            lcd::reg::DMA => {
+            ppu::reg::DMA => {
                 assert_eq!(self.oam_clocks_left, 0);
                 self.oam_clocks_left = NUM_OAM_CLOCKS;
                 self.oam_base_addr = u16::from_le_bytes([0x00, val]);
@@ -219,7 +250,7 @@ impl MMU {
             address: u16,
             len: usize,
         ) -> &[u8] {
-            mem.safe_slice(address - start, len)
+            mem.safe_slice((address - start) as usize, len)
         }
         match address {
             // | BIOS   | Bootstrap program (when enabled)

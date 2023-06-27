@@ -27,14 +27,13 @@ impl<const SIZE: usize> Mem<SIZE> {
     }
 
     #[inline]
-    pub fn slice(&self, addr: u16, n: usize) -> &[u8] {
-        let start = addr as usize;
-        &self.0[start..start + n]
+    pub fn slice(&self, addr: usize, n: usize) -> &[u8] {
+        &self.0[addr..addr + n]
     }
 
     #[inline]
-    pub fn safe_slice(&self, addr: u16, n: usize) -> &[u8] {
-        let safe_len = std::cmp::min(self.size() - (addr as usize), n);
+    pub fn safe_slice(&self, addr: usize, n: usize) -> &[u8] {
+        let safe_len = std::cmp::min(self.size() - addr, n);
         self.slice(addr, safe_len)
     }
 
@@ -42,6 +41,11 @@ impl<const SIZE: usize> Mem<SIZE> {
     pub fn copy_from_slice(&mut self, data: &[u8]) {
         assert!(data.len() <= self.size());
         self.0.copy_from_slice(data);
+    }
+
+    #[inline]
+    pub fn slice_n<const N: usize>(&self, start: usize) -> &[u8; N] {
+        self.0.as_slice()[start..start + N].try_into().unwrap()
     }
 
     #[inline]
@@ -122,8 +126,6 @@ impl<'de, const N: usize> serde::Deserialize<'de> for Mem<N> {
                 })
             }
         }
-        deserializer
-            .deserialize_byte_buf(Visitor::<N>)
-            .map(|bytes| Mem(bytes))
+        deserializer.deserialize_byte_buf(Visitor::<N>).map(Mem)
     }
 }

@@ -10,13 +10,19 @@ pub mod constants {
 }
 
 #[inline]
-pub(crate) fn get_bit(byte: u8, idx: u8) -> u8 {
-    (byte & (1 << idx)) >> idx
+pub(crate) fn get_bit<N>(byte: N, idx: usize) -> N
+where
+    N: num::traits::PrimInt,
+{
+    (byte & (N::one() << idx)) >> idx
 }
 
 #[inline]
-pub(crate) fn bit_set(byte: u8, idx: u8) -> bool {
-    get_bit(byte, idx) != 0
+pub(crate) fn bit_set<N>(byte: N, idx: usize) -> bool
+where
+    N: num::traits::PrimInt,
+{
+    get_bit::<N>(byte, idx) != N::zero()
 }
 
 #[inline]
@@ -25,20 +31,14 @@ pub(crate) fn lo_bits_of(x: usize, n: usize) -> usize {
 }
 
 #[inline]
-pub(crate) fn set_bit(byte: u8, idx: u8, flag: u8) -> u8 {
-    let flag_bool = flag != 0;
-    let flag_mask = -(flag_bool as i8) as u8;
-    let bit_mask = 1 << idx;
+pub(crate) fn set_bit<N: num::PrimInt + From<u8>>(
+    byte: N,
+    idx: usize,
+    flag: N,
+) -> N {
+    let flag_mask = flag.signed_shl(idx as u32);
+    let bit_mask = N::one() << idx;
     (byte & !bit_mask) | (flag_mask & bit_mask)
-}
-
-#[inline]
-pub(crate) fn wrapping_add(a: usize, b: usize, bound: usize) -> usize {
-    if a + b >= bound {
-        (a + b) % bound
-    } else {
-        a + b
-    }
 }
 
 #[inline]
@@ -55,7 +55,7 @@ pub(crate) fn disp_chunks(
     for idx in 0..chunk_size {
         disp.push_str(&format!("{:02X}  ", idx));
     }
-    disp.push_str("\n");
+    disp.push('\n');
     let chunks = block.len() / chunk_size;
     for n in 0..chunks {
         let needle = n * chunk_size;
@@ -189,4 +189,67 @@ pub fn spin_sleep(duration: std::time::Duration) {
 
 pub trait Dump {
     fn dump<W: std::fmt::Write>(&self, out: &mut W) -> std::fmt::Result;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_bits() {
+        for n in 0..7 {
+            assert_eq!(get_bit(0b1111_1111, n), 1);
+        }
+        assert_eq!(get_bit(0b1111_0000, 7), 1);
+        assert_eq!(get_bit(0b1111_0000, 4), 1);
+        assert_eq!(get_bit(0b1111_0000, 3), 0);
+        assert_eq!(get_bit(0b1111_0000, 0), 0);
+    }
+
+    #[test]
+    fn set_bits() {
+        // 8 bit ops
+        assert_eq!(set_bit(0b0000_0000, 0, 0), 0b0000_0000);
+        assert_eq!(set_bit(0b0000_0000, 1, 0), 0b0000_0000);
+        assert_eq!(set_bit(0b0000_0000, 7, 0), 0b0000_0000);
+        assert_eq!(set_bit(0b0000_0000, 0, 1), 0b0000_0001);
+        assert_eq!(set_bit(0b0000_0000, 1, 1), 0b0000_0010);
+        assert_eq!(set_bit(0b0000_0000, 7, 1), 0b1000_0000);
+        assert_eq!(set_bit(0b1111_1111, 0, 0), 0b1111_1110);
+        assert_eq!(set_bit(0b1111_1111, 1, 0), 0b1111_1101);
+        assert_eq!(set_bit(0b1111_1111, 7, 0), 0b0111_1111);
+        assert_eq!(set_bit(0b1111_1111, 0, 1), 0b1111_1111);
+        assert_eq!(set_bit(0b1111_1111, 1, 1), 0b1111_1111);
+        assert_eq!(set_bit(0b1111_1111, 7, 1), 0b1111_1111);
+
+        // 16 bit ops
+        assert_eq!(set_bit(0b0000_0000_0000_0000, 0, 0), 0b0000_0000_0000_0000);
+        assert_eq!(set_bit(0b0000_0000_0000_0000, 1, 0), 0b0000_0000_0000_0000);
+        assert_eq!(set_bit(0b0000_0000_0000_0000, 7, 0), 0b0000_0000_0000_0000);
+        assert_eq!(
+            set_bit(0b0000_0000_0000_0000, 11, 0),
+            0b0000_0000_0000_0000
+        );
+        assert_eq!(set_bit(0b0000_0000_0000_0000, 0, 1), 0b0000_0000_0000_0001);
+        assert_eq!(set_bit(0b0000_0000_0000_0000, 1, 1), 0b0000_0000_0000_0010);
+        assert_eq!(set_bit(0b0000_0000_0000_0000, 7, 1), 0b0000_0000_1000_0000);
+        assert_eq!(
+            set_bit(0b0000_0000_0000_0000, 11, 1),
+            0b0000_1000_0000_0000
+        );
+        assert_eq!(set_bit(0b1111_1111_1111_1111, 0, 0), 0b1111_1111_1111_1110);
+        assert_eq!(set_bit(0b1111_1111_1111_1111, 1, 0), 0b1111_1111_1111_1101);
+        assert_eq!(set_bit(0b1111_1111_1111_1111, 7, 0), 0b1111_1111_0111_1111);
+        assert_eq!(
+            set_bit(0b1111_1111_1111_1111, 11, 0),
+            0b1111_0111_1111_1111
+        );
+        assert_eq!(set_bit(0b1111_1111_1111_1111, 0, 1), 0b1111_1111_1111_1111);
+        assert_eq!(set_bit(0b1111_1111_1111_1111, 1, 1), 0b1111_1111_1111_1111);
+        assert_eq!(set_bit(0b1111_1111_1111_1111, 7, 1), 0b1111_1111_1111_1111);
+        assert_eq!(
+            set_bit(0b1111_1111_1111_1111, 11, 1),
+            0b1111_1111_1111_1111
+        );
+    }
 }

@@ -30,7 +30,28 @@ impl MBC1 {
     pub fn load(&self, address: u16, data: &[u8]) -> u8 {
         match address {
             0xA000..=0xBFFF if !self.ram_enable => 0xFF,
+            0xA000..=0xBFFF => self.sram[address - 0xA000],
             _ => data[self.addr_to_offset(address)],
+        }
+    }
+
+    pub fn block_load<'a>(
+        &'a self,
+        address: u16,
+        len: usize,
+        data: &'a [u8],
+    ) -> &'a [u8] {
+        match address {
+            0x0000..=0x7FFF => {
+                let offset = self.addr_to_offset(address);
+                let len_to_load = std::cmp::min(data.len() - offset, len);
+                &data[offset..][..len_to_load]
+            }
+            0xA000..=0xBFFF => {
+                let offset = (address - 0xA000) as usize;
+                self.sram.safe_slice(offset, len)
+            }
+            _ => unreachable!(),
         }
     }
 
@@ -43,21 +64,12 @@ impl MBC1 {
                 _ => {}
             },
             // ROM Bank (lower)
-            0x2000..=0x3FFF => {
-                self.rom_bank_lower5 = val & 0x1F;
-            }
+            0x2000..=0x3FFF => self.rom_bank_lower5 = val & 0x1F,
             // RAM Bank (or upper bits of ROM Bank)
-            0x4000..=0x5FFF => {
-                self.ram_or_rom_upper2 = val & 0x3;
-            }
+            0x4000..=0x5FFF => self.ram_or_rom_upper2 = val & 0x3,
             // ROM/RAM Mode
-            0x6000..=0x7FFF => {
-                self.bank_mode_select = val & 0x1;
-                return;
-            }
-            0xA000..=0xBFFF => {
-                self.sram[address - 0xA000] = val;
-            }
+            0x6000..=0x7FFF => self.bank_mode_select = val & 0x1,
+            0xA000..=0xBFFF => self.sram[address - 0xA000] = val,
             _ => unreachable!(
                 "Store outside of MBC range? ({val:02X} to {address:04X})"
             ),
@@ -144,7 +156,7 @@ impl MBC3 {
     }
 
     fn addr_to_sram_offset(&self, address: u16) -> usize {
-        let bank_offset = (self.ram_bank as usize) * (EIGHT_K as usize);
+        let bank_offset = (self.ram_bank as usize) * EIGHT_K;
         ((address - 0xA000) as usize) + bank_offset
     }
 
@@ -155,6 +167,26 @@ impl MBC3 {
                 self.sram[self.addr_to_sram_offset(address)]
             }
             0x0000..=0x7FFF => data[self.addr_to_offset(address)],
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn block_load<'a>(
+        &'a self,
+        address: u16,
+        len: usize,
+        data: &'a [u8],
+    ) -> &'a [u8] {
+        match address {
+            0x0000..=0x7FFF => {
+                let offset = self.addr_to_offset(address);
+                let len_to_load = std::cmp::min(data.len() - offset, len);
+                &data[offset..][..len_to_load]
+            }
+            0xA000..=0xBFFF => {
+                let offset = self.addr_to_sram_offset(address);
+                self.sram.safe_slice(offset, len)
+            }
             _ => unreachable!(),
         }
     }
@@ -252,7 +284,7 @@ impl MBC5 {
     }
 
     fn addr_to_sram_offset(&self, address: u16) -> usize {
-        let bank_offset = (self.ram_bank as usize) * (EIGHT_K as usize);
+        let bank_offset = (self.ram_bank as usize) * EIGHT_K;
         ((address - 0xA000) as usize) + bank_offset
     }
 
@@ -263,6 +295,26 @@ impl MBC5 {
                 self.sram[self.addr_to_sram_offset(address)]
             }
             0x0000..=0x7FFF => data[self.addr_to_offset(address)],
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn block_load<'a>(
+        &'a self,
+        address: u16,
+        len: usize,
+        data: &'a [u8],
+    ) -> &'a [u8] {
+        match address {
+            0x0000..=0x7FFF => {
+                let offset = self.addr_to_offset(address);
+                let len_to_load = std::cmp::min(data.len() - offset, len);
+                &data[offset..][..len_to_load]
+            }
+            0xA000..=0xBFFF => {
+                let offset = self.addr_to_sram_offset(address);
+                self.sram.safe_slice(offset, len)
+            }
             _ => unreachable!(),
         }
     }

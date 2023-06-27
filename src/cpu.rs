@@ -26,7 +26,6 @@ use regs::*;
 pub struct Tick {
     pub breakpoint_was_hit: bool,
     pub op_was_retired: bool,
-    pub op_was_fetched: bool,
     pub pc: u16,
 }
 const CYCLES_PER_TICK: u64 = 4;
@@ -63,7 +62,7 @@ impl Breakpoints {
     }
 
     fn check_hit(&mut self, addr: &u16) -> bool {
-        if self.addr2hits.len() == 0 {
+        if self.addr2hits.is_empty() {
             return false;
         }
         if let Some(count) = self.addr2hits.get_mut(addr) {
@@ -131,11 +130,6 @@ impl CPU {
         let mut this_tick = Tick::default();
         this_tick.pc = self.regs.pc;
 
-        // Now tick devices (MMU/LCD/Timer) and check for interrupts that need
-        // to be flagged in IF. Do this *before* we possibly dispatch an
-        // interrupt this tick.
-        self.tick_devices_and_check_interrupts();
-
         // Check if we're halted. If so, and there is an interrupt requested,
         // un-halt and continue execution.
         match self.state {
@@ -146,6 +140,29 @@ impl CPU {
             State::InterruptDelay(ref mut delay) => *delay -= CYCLES_PER_TICK,
             _ => {}
         }
+
+        // We possibly fetched an instruction, or are currently executing an
+        // instruction. If the instruction finishes this cycle, mark the
+        // instruction as retired; otherwise tick one cycle.
+        match self.state {
+            State::ExecutingOp(CYCLES_PER_TICK) => {
+                // Some instructions conditionally require extra cycles (e.g.
+                // taken branches).
+                let extra_cycles =
+                    self.execute_one_op(self.current_op.unwrap());
+                if self.state != State::Halted {
+                    self.state = State::RetiringOp(extra_cycles);
+                }
+                this_tick.op_was_retired = true;
+            }
+            State::ExecutingOp(ref mut cycles)
+            | State::RetiringOp(ref mut cycles)
+                if *cycles > 0 =>
+            {
+                *cycles -= CYCLES_PER_TICK;
+            }
+            _ => {}
+        };
 
         // Check if we're ready to fetch a new instruction (i.e. the
         // currently-executing op is retiring.) Check if we need to enable
@@ -162,55 +179,28 @@ impl CPU {
             let next_op = self.fetch_and_decode_one_op();
             self.current_op = Some(next_op);
             self.state = State::ExecutingOp(next_op.clocks as u64);
-            this_tick.op_was_fetched = true;
 
             if self.breakpoints.check_hit(&self.regs.pc) {
                 this_tick.breakpoint_was_hit = true;
             }
         };
 
-        // We possibly fetched an instruction, or are currently executing an
-        // instruction. If the instruction finishes this cycle, mark the
-        // instruction as retired; otherwise tick one cycle.
-        match self.state {
-            State::ExecutingOp(CYCLES_PER_TICK) => {
-                // Some instructions take conditionally require extra cycles
-                // (e.g. taken branches).
-                let extra_cycles =
-                    self.execute_one_op(self.current_op.unwrap());
-                if self.state != State::Halted {
-                    self.state = State::RetiringOp(extra_cycles);
-                }
-                this_tick.op_was_retired = true;
-            }
-            State::ExecutingOp(ref mut cycles)
-            | State::RetiringOp(ref mut cycles) => {
-                *cycles -= CYCLES_PER_TICK;
-            }
-            _ => {}
-        };
+        // Now tick devices (MMU/LCD/Timer) and check for interrupts that need
+        // to be flagged in IF. Do this *before* we possibly dispatch an
+        // interrupt this tick.
+        self.tick_devices_and_check_interrupts();
 
         this_tick
     }
 
     fn tick_devices_and_check_interrupts(&mut self) {
         self.mmu.tick();
-        let (need_vblank_interrupt, need_stat_interrupt) =
-            self.mmu.io.lcd.tick();
-        let need_timer_interrupt = self.mmu.io.timer.tick();
-        let need_joypad_interrupt = self.mmu.io.joypad.tick();
-        if need_vblank_interrupt
-            || need_stat_interrupt
-            || need_timer_interrupt
-            || need_joypad_interrupt
-        {
-            let iflags = self.mmu.load8_unchecked(IF);
-            let vblank = (need_vblank_interrupt as u8) << 0;
-            let stat = (need_stat_interrupt as u8) << 1;
-            let timer = (need_timer_interrupt as u8) << 2;
-            let joypad = (need_joypad_interrupt as u8) << 4;
-            self.mmu
-                .store8_unchecked(IF, iflags | stat | timer | vblank | joypad);
+        let interrupts = self.mmu.io.tick();
+        if interrupts.any_requested() {
+            self.mmu.store8_unchecked(
+                IF,
+                self.mmu.load8_unchecked(IF) | interrupts.mask(),
+            );
         }
     }
 
@@ -333,6 +323,16 @@ impl CPU {
 
 impl crate::utils::Dump for CPU {
     fn dump<W: std::fmt::Write>(&self, out: &mut W) -> std::fmt::Result {
+        write!(out, "State: ")?;
+        match self.state {
+            State::Stopped => writeln!(out, "stopped"),
+            State::Halted => writeln!(out, "halted"),
+            State::RetiringOp(n) => writeln!(out, "retiring ({n})"),
+            State::ExecutingOp(n) => writeln!(out, "executing ({n})"),
+            State::InterruptDelay(n) => {
+                writeln!(out, "dispatching interrupt ({n})")
+            }
+        }?;
         writeln!(out, "A : {0:02X}", self.regs.af[1])?;
         writeln!(
             out,

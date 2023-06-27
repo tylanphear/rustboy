@@ -19,13 +19,20 @@
 use parking_lot::Mutex;
 use std::{error::Error, ops::ControlFlow};
 
-const M_CLOCK_PERIOD: u64 = 4_194_304;
-const T_CLOCK_PERIOD: u64 = M_CLOCK_PERIOD / 4;
+const M_CLOCK_FREQUENCY: u64 = 4_194_304;
+const T_CLOCK_FREQUENCY: u64 = M_CLOCK_FREQUENCY / 4;
 const TICK_DURATION: std::time::Duration =
-    std::time::Duration::from_nanos(1_000_000_000 / T_CLOCK_PERIOD);
+    std::time::Duration::from_nanos(1_000_000_000 / T_CLOCK_FREQUENCY);
 
-const OPS_TO_ADVANCE_PER_RUN_STEP: usize = 100;
+const FRAMES_PER_SECOND: u64 = 60;
+const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
+const FRAME_DURATION: std::time::Duration =
+    std::time::Duration::from_nanos(NANOSECONDS_PER_SECOND / FRAMES_PER_SECOND);
 
+const TICKS_TO_ADVANCE_PER_RUN_STEP: u32 =
+    (T_CLOCK_FREQUENCY / FRAMES_PER_SECOND) as u32;
+
+mod audio;
 pub mod cart;
 pub mod cpu;
 pub mod debug;
@@ -37,7 +44,7 @@ pub mod opcodes;
 pub mod utils;
 
 use cpu::{Tick, CPU};
-use io::lcd;
+use io::ppu;
 
 use clap::Parser;
 
@@ -62,6 +69,7 @@ fn load_state_from_path(path: &str, cpu: &mut CPU) -> bool {
     };
     let decoder = flate2::read::GzDecoder::new(encoded);
     *cpu = ciborium::from_reader(decoder).unwrap();
+    cpu.mmu.io.joypad.reset();
     true
 }
 
@@ -90,7 +98,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             cpu.mmu.load_bios(BIOS);
             cpu.mmu.load_cart(rom);
         }
-        Mutex::new(RunCtx {
+        Box::leak(Box::new(Mutex::new(RunCtx {
             cpu,
             debug: cli_args.debug,
             run_state: if cli_args.debug {
@@ -101,31 +109,67 @@ fn main() -> Result<(), Box<dyn Error>> {
             //mem_addr: None,
             exit_requested: false,
             speedup_factor: 1.0,
-        })
+        })))
     };
     std::thread::scope(|s| {
-        let gui_thread = s.spawn(|| {
+        let ctx = &*ctx;
+        let gui_thread = s.spawn(move || {
             gui::main_loop(
-                |event| -> ControlFlow<()> {
+                move |event| -> ControlFlow<()> {
                     let mut ctx = ctx.lock();
                     handle_event_(&event, &mut ctx)
                 },
-                |ui: &imgui::Ui, frame: imgui::TextureId| {
+                move |ui: &imgui::Ui, frame: imgui::TextureId| {
                     let mut ctx = ctx.lock();
                     draw_ui_(ui, frame, &mut ctx);
                 },
-                |frame: &mut gui::ScreenBuffer| {
+                move |frame: &mut gui::ScreenBuffer| {
                     let ctx = ctx.lock();
                     ctx.cpu.mmu.io.lcd.render(frame)
                 },
             );
         });
-        let compute_thread = s.spawn(|| compute_thread_(&ctx));
+        let audio_thread = s.spawn(move || {
+            audio::loop_(
+                move |rate: u32| {
+                    let mut ctx = ctx.lock();
+                    audio_init(&mut ctx, rate);
+                },
+                move || {
+                    let ctx = ctx.lock();
+                    audio_tick(&ctx)
+                },
+                move |data: &mut [f32]| {
+                    let mut ctx = ctx.lock();
+                    audio_callback(&mut ctx, data);
+                },
+            )
+        });
+        let compute_thread = s.spawn(move || compute_thread_(ctx));
         gui_thread.join().unwrap();
         ctx.lock().exit_requested = true;
         compute_thread.join().unwrap();
+        audio_thread.join().unwrap();
     });
     Ok(())
+}
+
+fn audio_init(ctx: &mut RunCtx, rate: u32) {
+    ctx.cpu.mmu.io.apu.set_sample_rate(rate as usize)
+}
+
+fn audio_tick(ctx: &RunCtx) -> audio::Action {
+    if ctx.exit_requested {
+        return audio::Action::Exit;
+    }
+    match ctx.run_state {
+        RunState::Paused | RunState::Stepping(..) => audio::Action::Pause,
+        RunState::Running => audio::Action::Play,
+    }
+}
+
+fn audio_callback(ctx: &mut RunCtx, data: &mut [f32]) {
+    ctx.cpu.mmu.io.apu.render(data);
 }
 
 fn read_rom(path: &str) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -139,7 +183,7 @@ fn read_rom(path: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RunState {
     Paused,
-    Stepping(usize),
+    Stepping(u32),
     Running,
 }
 
@@ -193,6 +237,10 @@ fn draw_ui_(ui: &imgui::Ui, frame: imgui::TextureId, ctx: &mut RunCtx) {
             .position(LCD_POS, imgui::Condition::FirstUseEver)
             .movable(false)
             .build(|| {
+                ui.text(format!(
+                    "TICK RATE: {}",
+                    TICKS_TO_ADVANCE_PER_RUN_STEP
+                ));
                 ui.text_wrapped(dump!(ctx.cpu.mmu.io.lcd));
             })
             .unwrap();
@@ -225,17 +273,17 @@ fn draw_ui_(ui: &imgui::Ui, frame: imgui::TextureId, ctx: &mut RunCtx) {
             .position(CONTROLS_POS, imgui::Condition::FirstUseEver)
             .movable(false)
             .build(|| {
-                let mut addr_str = String::new();
+                let mut scratch = String::new();
                 let bp_changed = ui
-                    .input_text("breakpoint", &mut addr_str)
+                    .input_text("breakpoint", &mut scratch)
                     .enter_returns_true(true)
                     .build();
                 if bp_changed {
-                    if let Some(addr) = parse_addr(&addr_str) {
+                    if let Some(addr) = parse_addr(&scratch) {
                         ctx.cpu.breakpoints.register(addr);
                     }
-                    addr_str.clear();
                 }
+                scratch.clear();
                 ui.input_float("speedup", &mut ctx.speedup_factor).build();
                 //let mem_changed = ui
                 //    .input_text("mem", &mut addr_str)
@@ -247,6 +295,20 @@ fn draw_ui_(ui: &imgui::Ui, frame: imgui::TextureId, ctx: &mut RunCtx) {
                 let breaks = ctx.cpu.breakpoints.dump();
                 if !breaks.is_empty() {
                     ui.text(breaks);
+                }
+                let wp_changed = ui
+                    .input_text("watchpoint", &mut scratch)
+                    .enter_returns_true(true)
+                    .build();
+                if wp_changed {
+                    if let Some(addr) = parse_addr(&scratch) {
+                        ctx.cpu.mmu.register_watchpoint(addr);
+                    }
+                }
+                scratch.clear();
+                ctx.cpu.mmu.dump_watchpoints(&mut scratch).unwrap();
+                if !scratch.is_empty() {
+                    ui.text_wrapped(scratch);
                 }
             })
             .unwrap();
@@ -262,12 +324,12 @@ fn draw_ui_(ui: &imgui::Ui, frame: imgui::TextureId, ctx: &mut RunCtx) {
         //        ui.text(utils::disp_chunks(block, start, 0x10));
         //    })
         //    .unwrap();
-        const CART_INFO_POS: [f32; 2] =
+        const CART_POS: [f32; 2] =
             [CONTROLS_POS[X] + CONTROLS_SIZE[X], CONTROLS_POS[Y]];
-        const CART_INFO_SIZE: [f32; 2] = [200.0, 200.0];
+        const CART_SIZE: [f32; 2] = [200.0, 200.0];
         ui.window("cartridge")
-            .size(CART_INFO_SIZE, imgui::Condition::FirstUseEver)
-            .position(CART_INFO_POS, imgui::Condition::FirstUseEver)
+            .size(CART_SIZE, imgui::Condition::FirstUseEver)
+            .position(CART_POS, imgui::Condition::FirstUseEver)
             .build(|| {
                 if let Some(ref cart) = ctx.cpu.mmu.cartridge {
                     ui.text_wrapped(dump!(cart));
@@ -284,17 +346,6 @@ fn draw_ui_(ui: &imgui::Ui, frame: imgui::TextureId, ctx: &mut RunCtx) {
                 ui.text_wrapped(dump!(ctx.cpu.mmu.io.timer));
             })
             .unwrap();
-        const LOG_POS: [f32; 2] = [TIMER_POS[X] + TIMER_SIZE[X], TIMER_POS[Y]];
-        const LOG_SIZE: [f32; 2] = [400.0, 100.0];
-        ui.window("log")
-            .size(LOG_SIZE, imgui::Condition::FirstUseEver)
-            .position(LOG_POS, imgui::Condition::FirstUseEver)
-            .movable(false)
-            .build(|| {
-                ui.text_wrapped(debug_log_as_str!());
-                ui.set_scroll_here_y_with_ratio(1.0);
-            })
-            .unwrap();
         const DISASM_POS: [f32; 2] = [REGS_POS[X] + REGS_SIZE[X], REGS_POS[Y]];
         const DISASM_SIZE: [f32; 2] = [200.0, 300.0];
         ui.window("disassembly")
@@ -302,7 +353,11 @@ fn draw_ui_(ui: &imgui::Ui, frame: imgui::TextureId, ctx: &mut RunCtx) {
             .position(DISASM_POS, imgui::Condition::FirstUseEver)
             .movable(false)
             .build(|| {
+                // TODO: this is hack: we can't be sure the last instruction
+                // boundary was 16 bytes ago, since CB-prefixed instructions
+                // are 2-bytes wide.
                 let adjusted_pc = ctx.cpu.regs.pc.saturating_sub(16);
+
                 let current_offset = (ctx.cpu.regs.pc - adjusted_pc) as usize;
                 let bytes = ctx.cpu.mmu.block_load(adjusted_pc, usize::MAX);
                 let insts: Vec<_> = disassembler::InstIter::new(bytes)
@@ -324,6 +379,28 @@ fn draw_ui_(ui: &imgui::Ui, frame: imgui::TextureId, ctx: &mut RunCtx) {
                     })
                     .collect();
                 ui.text_wrapped(insts.join("\n"));
+            })
+            .unwrap();
+        const APU_POS: [f32; 2] =
+            [DISASM_POS[X] + DISASM_SIZE[X], DISASM_POS[Y]];
+        const APU_SIZE: [f32; 2] = [300.0, 300.0];
+        ui.window("APU")
+            .size(APU_SIZE, imgui::Condition::FirstUseEver)
+            .position(APU_POS, imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                ui.text_wrapped(dump!(ctx.cpu.mmu.io.apu));
+            })
+            .unwrap();
+        const LOG_POS: [f32; 2] = [CART_POS[X] + CART_SIZE[X], CART_POS[Y]];
+        const LOG_SIZE: [f32; 2] = [400.0, 400.0];
+        ui.window("log")
+            .size(LOG_SIZE, imgui::Condition::FirstUseEver)
+            .position(LOG_POS, imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                ui.text_wrapped(debug_log_as_str!());
+                ui.set_scroll_here_y_with_ratio(1.0);
             })
             .unwrap();
     } else {
@@ -369,34 +446,22 @@ fn reset_cpu(ctx: &mut RunCtx) {
 }
 
 fn compute_thread_(ctx: &Mutex<RunCtx>) {
-    use std::fmt::Write;
-
-    let mut scratch_str = String::new();
-    macro_rules! f {
-        ($($args:tt)*) => {{
-            scratch_str.clear();
-            writeln!(&mut scratch_str, $($args)*).unwrap();
-            &scratch_str
-        }}
-    }
-
     loop {
         let mut ctx = ctx.lock();
         if ctx.exit_requested {
             break;
         }
-        let mut ops_to_advance = match ctx.run_state {
+        let ticks_to_advance = match ctx.run_state {
             RunState::Paused => {
                 // When paused, sleep a little bit so we don't busy wait
                 std::thread::sleep(std::time::Duration::from_micros(500));
                 continue;
             }
             RunState::Stepping(n) => n,
-            RunState::Running => OPS_TO_ADVANCE_PER_RUN_STEP,
+            RunState::Running => TICKS_TO_ADVANCE_PER_RUN_STEP,
         };
-        let mut expected_tick_time = std::time::Duration::ZERO;
         let before_ticks = std::time::Instant::now();
-        while ops_to_advance > 0 {
+        for _ in 0..ticks_to_advance {
             if ctx.debug && debug::break_::check_and_reset() {
                 crate::debug_log!("Hit breakpoint '{0:04X?}'", ctx.cpu.regs.pc);
                 ctx.run_state = RunState::Paused;
@@ -405,7 +470,6 @@ fn compute_thread_(ctx: &Mutex<RunCtx>) {
             let Tick {
                 pc,
                 breakpoint_was_hit,
-                op_was_fetched: _,
                 op_was_retired,
             } = ctx.cpu.tick();
             if ctx.debug {
@@ -416,14 +480,15 @@ fn compute_thread_(ctx: &Mutex<RunCtx>) {
                     break;
                 }
             }
-            if op_was_retired {
-                ops_to_advance = ops_to_advance.saturating_sub(1);
-            }
-            expected_tick_time += TICK_DURATION;
         }
         match ctx.run_state {
             RunState::Stepping(..) => ctx.run_state = RunState::Paused,
             RunState::Running => {
+                let speedup_factor = ctx.speedup_factor;
+                // Explicitly drop the mutex before sleeping, so we hold the
+                // lock for as little time as possible.
+                drop(ctx);
+                let expected_tick_time = TICK_DURATION * ticks_to_advance;
                 let actual_tick_time = before_ticks.elapsed();
                 if expected_tick_time < actual_tick_time {
                     crate::debug_log!(
@@ -433,10 +498,10 @@ fn compute_thread_(ctx: &Mutex<RunCtx>) {
                     );
                 } else {
                     let time_to_sleep = expected_tick_time - actual_tick_time;
-                    let slowdown = if ctx.speedup_factor == 0.0 {
+                    let slowdown = if speedup_factor == 0.0 {
                         1.0
                     } else {
-                        1.0 / ctx.speedup_factor
+                        1.0 / speedup_factor
                     };
                     crate::utils::spin_sleep(time_to_sleep.mul_f32(slowdown));
                 }
@@ -453,8 +518,8 @@ fn handle_event_(event: &gui::Event, ctx: &mut RunCtx) -> ControlFlow<()> {
         Some(match key {
             K::Num1 => io::joypad::START,
             K::Num2 => io::joypad::SELECT,
-            K::Z => io::joypad::A,
-            K::X => io::joypad::B,
+            K::Z => io::joypad::B,
+            K::X => io::joypad::A,
             K::Left => io::joypad::LEFT,
             K::Right => io::joypad::RIGHT,
             K::Up => io::joypad::UP,
@@ -475,8 +540,11 @@ fn handle_event_(event: &gui::Event, ctx: &mut RunCtx) -> ControlFlow<()> {
             ControlFlow::Continue(())
         }
         gui::Event::KeyDown(K::N) => {
-            ctx.run_state =
-                RunState::Stepping(1 + (ctx.cpu.executing_op() as usize));
+            ctx.run_state = RunState::Stepping(1);
+            ControlFlow::Continue(())
+        }
+        gui::Event::KeyDown(K::M) => {
+            ctx.run_state = RunState::Stepping(4);
             ControlFlow::Continue(())
         }
         gui::Event::KeyDown(K::S) => {

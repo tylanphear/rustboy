@@ -1,26 +1,58 @@
+pub mod apu;
 pub mod joypad;
-pub mod lcd;
+pub mod ppu;
 pub mod timer;
+use apu::APU;
 use joypad::Joypad;
-use lcd::LCDController;
+use ppu::LCDController;
 use serde::{Deserialize, Serialize};
 use timer::Timer;
+
+#[derive(Default)]
+pub struct Interrupts(u8);
+impl Interrupts {
+    pub fn request_vblank(&mut self) {
+        self.0 |= 1 << 0;
+    }
+    pub fn request_lcd_stat(&mut self) {
+        self.0 |= 1 << 1;
+    }
+    pub fn request_timer(&mut self) {
+        self.0 |= 1 << 2;
+    }
+    pub fn request_joypad(&mut self) {
+        self.0 |= 1 << 4;
+    }
+    pub fn any_requested(&self) -> bool {
+        self.0 != 0
+    }
+    pub fn mask(&self) -> u8 {
+        self.0
+    }
+}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct IOController {
     pub lcd: LCDController,
+    pub apu: APU,
     pub timer: Timer,
     pub joypad: Joypad,
 }
 
 impl IOController {
-    pub fn new() -> IOController {
-        Self::default()
-    }
-
     pub fn reset(&mut self) {
         self.lcd.reset();
         self.timer.reset();
+        self.apu.reset();
+    }
+
+    pub fn tick(&mut self) -> Interrupts {
+        let mut interrupts = Interrupts::default();
+        self.lcd.tick(&mut interrupts);
+        self.timer.tick(&mut interrupts);
+        self.joypad.tick(&mut interrupts);
+        self.apu.tick();
+        interrupts
     }
 
     pub fn load(&self, address: u16) -> u8 {
@@ -29,17 +61,12 @@ impl IOController {
             0xFF01..=0xFF02 =>
             /* todo: serial */
             {
-                //crate::debug_log!("todo: serial (load {address:04X})");
-                0
-            }
-            0xFF40..=0xFF4B => self.lcd.load(address),
-            0xFF10..=0xFF3F =>
-            /* sound controller */
-            {
-                //crate::debug_log!("todo: sound (load {address:04X})");
+                crate::debug_log!("todo: serial (load {address:04X})");
                 0
             }
             0xFF04..=0xFF07 => self.timer.load(address),
+            0xFF10..=0xFF3F => self.apu.load(address),
+            0xFF40..=0xFF4B => self.lcd.load(address),
             0xFF03 | 0xFF08..=0xFF0E => {
                 /* unused */
                 0xFF
@@ -51,20 +78,16 @@ impl IOController {
     pub fn store(&mut self, address: u16, val: u8) {
         match address {
             0xFF00 => self.joypad.store(address, val),
-            0xFF40..=0xFF4B => self.lcd.store(address, val),
-            0xFF10..=0xFF3F =>
-            /* sound controller */
-            {
-                //crate::debug_log!("todo: sound (store {address:04X})");
-                return;
-            }
             0xFF01..=0xFF02 =>
             /* todo: serial */
             {
-                //crate::debug_log!("todo: serial (store {address:04X})");
-                return;
+                crate::debug_log!(
+                    "todo: serial (store {val:02X} {address:04X})"
+                );
             }
             0xFF04..=0xFF07 => self.timer.store(address, val),
+            0xFF10..=0xFF3F => self.apu.store(address, val),
+            0xFF40..=0xFF4B => self.lcd.store(address, val),
             0xFF03 | 0xFF08..=0xFF0E => { /* unused */ }
             _ => panic!("{address:04X} write outside of IO range!"),
         }

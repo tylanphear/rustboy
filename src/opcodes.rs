@@ -65,7 +65,6 @@ impl<'a> serde::Deserialize<'a> for &'static Op {
 }
 
 pub mod trap {
-    pub const TODO: u8 = 0;
     pub const NOT_EXISTS: u8 = 1;
     pub const UNREACHABLE: u8 = 2;
 }
@@ -131,6 +130,7 @@ pub mod ld16 {
     pub const POP: u8 = 2;
     pub const SAVESP: u8 = 3;
     pub const LDSPHL: u8 = 4;
+    #[allow(non_upper_case_globals)]
     pub const LDHLSPr8: u8 = 5;
 }
 
@@ -368,9 +368,6 @@ macro_rules! op {
     };
     ($repr:literal, $num_bytes:literal, $clocks:literal, $handler:ident) => {
         op!($repr, $num_bytes, $clocks, $handler, 0, 0)
-    };
-    ($todo_text:literal) => {
-        op!($todo_text, 1, 1, trap, TODO, 0)
     };
 }
 
@@ -1212,7 +1209,7 @@ fn bit(cpu: &mut CPU, args: [u8; 2], _: u8) -> OpStatus {
 fn setb(cpu: &mut CPU, args: [u8; 2], _: u8) -> OpStatus {
     let [idx, reg] = args;
     let val = readsrc(cpu, reg);
-    let result = utils::set_bit(val, idx, 1);
+    let result = utils::set_bit(val, idx as usize, 1);
     writeback(cpu, reg, result);
     OpStatus::Normal
 }
@@ -1220,7 +1217,7 @@ fn setb(cpu: &mut CPU, args: [u8; 2], _: u8) -> OpStatus {
 fn resb(cpu: &mut CPU, args: [u8; 2], _: u8) -> OpStatus {
     let [idx, reg] = args;
     let val = readsrc(cpu, reg);
-    let result = utils::set_bit(val, idx, 0);
+    let result = utils::set_bit(val, idx as usize, 0);
     writeback(cpu, reg, result);
     OpStatus::Normal
 }
@@ -1354,13 +1351,11 @@ fn rot(cpu: &mut CPU, args: [u8; 2], _: u8) -> OpStatus {
     OpStatus::Normal
 }
 
+#[cold]
 fn trap(cpu: &mut CPU, args: [u8; 2], op_bytes: u8) -> OpStatus {
     let [action, _] = args;
     let bytes = cpu.mmu.block_load(cpu.regs.pc, op_bytes as usize);
     match action {
-        trap::TODO => {
-            unreachable!("Crash: op {bytes:02X?} not yet implemented!")
-        }
         trap::NOT_EXISTS => {
             unreachable!("Crash: op {bytes:02X?} doesn't exist!")
         }
