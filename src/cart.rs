@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 mod mappers;
 
 use crate::utils::constants::{EIGHT_K, THIRTY_TWO_K};
+use crate::utils::mem::Mem;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Cartridge {
@@ -16,23 +17,21 @@ impl Cartridge {
             data.len() >= THIRTY_TWO_K,
             "cart must be at least 32K bytes long"
         );
-        let mut this = Cartridge {
-            data,
-            mbc: MBC::None,
-        };
-        this.mbc = match this.type_() {
-            0x00 => MBC::None,
+        let mbc = match data[0x147] {
+            0x00 => MBC::None {
+                sram: Default::default(),
+            },
             0x01..=0x03 => MBC::MBC1(mappers::MBC1::default()),
             0x0F..=0x13 => MBC::MBC3(mappers::MBC3::default()),
             0x19 => MBC::MBC5(mappers::MBC5::default()),
             type_ => todo!("cartridge type {type_:02X} unsupported"),
         };
-        this
+        Cartridge { data, mbc }
     }
 
     pub fn reset(&mut self) {
         match &mut self.mbc {
-            MBC::None => {}
+            MBC::None { sram } => sram.clear(),
             MBC::MBC1(mbc) => mbc.reset(),
             MBC::MBC3(mbc) => mbc.reset(),
             MBC::MBC5(mbc) => mbc.reset(),
@@ -41,7 +40,7 @@ impl Cartridge {
 
     fn addr_to_offset(&self, address: u16) -> usize {
         match &self.mbc {
-            MBC::None => address as usize,
+            MBC::None { .. } => address as usize,
             MBC::MBC1(mbc) => mbc.addr_to_offset(address),
             MBC::MBC3(mbc) => mbc.addr_to_offset(address),
             MBC::MBC5(mbc) => mbc.addr_to_offset(address),
@@ -50,7 +49,10 @@ impl Cartridge {
 
     pub fn store(&mut self, address: u16, val: u8) {
         match &mut self.mbc {
-            MBC::None => {}
+            MBC::None { sram } => match address {
+                0xA000..=0xBFFF => sram[address - 0xA000] = val,
+                _ => {}
+            },
             MBC::MBC1(mbc) => mbc.store(address, val),
             MBC::MBC3(mbc) => mbc.store(address, val),
             MBC::MBC5(mbc) => mbc.store(address, val),
@@ -59,7 +61,11 @@ impl Cartridge {
 
     pub fn load(&self, address: u16) -> u8 {
         match &self.mbc {
-            MBC::None => self.data[address as usize],
+            MBC::None { sram } => match address {
+                0x0000..=0x7FFF => self.data[address as usize],
+                0xA000..=0xBFFF => sram[address - 0xA000],
+                _ => unreachable!(),
+            },
             MBC::MBC1(mbc) => mbc.load(address, &self.data),
             MBC::MBC3(mbc) => mbc.load(address, &self.data),
             MBC::MBC5(mbc) => mbc.load(address, &self.data),
@@ -68,11 +74,18 @@ impl Cartridge {
 
     pub fn block_load(&self, address: u16, len: usize) -> &[u8] {
         match &self.mbc {
-            MBC::None => {
-                let offset = self.addr_to_offset(address);
-                let len_to_load = std::cmp::min(self.data.len() - offset, len);
-                &self.data[offset..][..len_to_load]
-            }
+            MBC::None { sram } => match address {
+                0x0000..=0x7FFF => {
+                    let offset = self.addr_to_offset(address);
+                    let len_to_load =
+                        std::cmp::min(self.data.len() - offset, len);
+                    &self.data[offset..][..len_to_load]
+                }
+                0xA000..=0xBFFF => {
+                    sram.safe_slice((address - 0xA000) as usize, len)
+                }
+                _ => unreachable!(),
+            },
             MBC::MBC1(mbc) => mbc.block_load(address, len, &self.data),
             MBC::MBC3(mbc) => mbc.block_load(address, len, &self.data),
             MBC::MBC5(mbc) => mbc.block_load(address, len, &self.data),
@@ -106,6 +119,38 @@ impl Cartridge {
             _ => unreachable!(),
         }
     }
+
+    pub fn dump_sram(&self) {
+        let path = std::path::PathBuf::from(self.name()).with_extension("sram");
+        let bytes = match &self.mbc {
+            MBC::None { sram } => sram.as_slice(),
+            MBC::MBC1(mbc) => mbc.sram(),
+            MBC::MBC3(mbc) => mbc.sram(),
+            MBC::MBC5(mbc) => mbc.sram(),
+        };
+        if let Err(e) = std::fs::write(path, bytes) {
+            crate::debug_log!("error writing sram: {e}");
+        }
+    }
+
+    pub fn load_sram(&mut self) {
+        let path = std::path::PathBuf::from(self.name()).with_extension("sram");
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    crate::debug_log!("error loading sram: {e}")
+                }
+                return;
+            }
+        };
+        match &mut self.mbc {
+            MBC::None { sram } => sram.copy_from_slice(&bytes),
+            MBC::MBC1(mbc) => mbc.load_sram(&bytes),
+            MBC::MBC3(mbc) => mbc.load_sram(&bytes),
+            MBC::MBC5(mbc) => mbc.load_sram(&bytes),
+        }
+    }
 }
 
 impl crate::utils::Dump for Cartridge {
@@ -119,10 +164,11 @@ impl crate::utils::Dump for Cartridge {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 enum MBC {
-    #[default]
-    None,
+    // TODO: extract this as a proper type -- also I don't think the
+    // implementation is correct
+    None { sram: Mem<EIGHT_K> },
     MBC1(mappers::MBC1),
     MBC3(mappers::MBC3),
     MBC5(mappers::MBC5),
@@ -131,7 +177,7 @@ enum MBC {
 impl crate::utils::Dump for MBC {
     fn dump<W: std::fmt::Write>(&self, out: &mut W) -> std::fmt::Result {
         match self {
-            MBC::None => writeln!(out, "No MBC"),
+            MBC::None { .. } => writeln!(out, "No MBC"),
             MBC::MBC1(mbc) => mbc.dump(out),
             MBC::MBC3(mbc) => mbc.dump(out),
             MBC::MBC5(mbc) => mbc.dump(out),

@@ -47,7 +47,7 @@ impl Joypad {
         self.need_interrupt = true;
     }
 
-    pub fn tick(&mut self, interrupts: &mut crate::io::Interrupts) {
+    pub fn tick(&mut self, interrupts: &mut crate::cpu::Interrupts) {
         if std::mem::take(&mut self.need_interrupt) {
             interrupts.request_joypad();
         }

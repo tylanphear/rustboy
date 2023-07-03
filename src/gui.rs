@@ -49,6 +49,8 @@ pub struct ScreenBuffer {
 }
 
 impl ScreenBuffer {
+    const NUM_RAW_PIXELS: usize = 4;
+
     pub fn new() -> Self {
         Self {
             gl_pixels: Box::new([0; 160 * 144 * 4]),
@@ -57,8 +59,6 @@ impl ScreenBuffer {
 }
 
 impl crate::ppu::ExternalScreenBuffer for ScreenBuffer {
-    const NUM_RAW_PIXELS: usize = 4;
-
     #[inline]
     #[rustfmt::skip]
     fn write_pixel(&mut self, idx: usize, raw_pixel: u8) {

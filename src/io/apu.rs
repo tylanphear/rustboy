@@ -7,14 +7,7 @@ use serde::{Deserialize, Serialize};
 //  frequency = 1s / period
 //  period = n samples / frequency
 
-const SQUARE_WAVES: [[f32; 8]; 4] = [
-    /* Duty 0 */ [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 1.0],
-    /* Duty 1 */ [1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 1.0],
-    /* Duty 2 */ [1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0],
-    /* Duty 3 */ [-1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, -1.0],
-];
-
-pub const MAIN_CLOCK_FREQUENCY: u64 = crate::T_CLOCK_FREQUENCY;
+pub const MAIN_CLOCK_FREQUENCY: u64 = crate::cpu::T_CLOCK_FREQUENCY;
 
 /// Gameboy audio consists of 4 channels:
 ///
@@ -23,7 +16,7 @@ pub const MAIN_CLOCK_FREQUENCY: u64 = crate::T_CLOCK_FREQUENCY;
 ///  3. Programmable wave channel w/ 32 4-bit samples
 ///  4. Noise channel with volume envelope
 
-pub mod regs {
+pub mod reg {
     /// (CH1) -PPP NSSS sweep Period, Negate, Shift
     pub const NR10: u16 = 0xFF10;
     /// (CH1) DDLL LLLL Duty, Length load (64-L)
@@ -76,136 +69,247 @@ pub const CHANNEL_3_TABLE_START: usize = 0xFF30;
 pub const CHANNEL_3_TABLE_END: usize = 0xFF40;
 pub const CHANNEL_3_TABLE_SIZE: usize =
     CHANNEL_3_TABLE_END - CHANNEL_3_TABLE_START;
-pub const REGS_START: usize = regs::NR10 as usize;
-pub const REGS_END: usize = CHANNEL_3_TABLE_END as usize;
-pub const NUM_OUTPUT_CHANNELS: usize = 2;
+pub const REGS_START: usize = reg::NR10 as usize;
+pub const REGS_END: usize = CHANNEL_3_TABLE_END;
 
-fn waveform_to_float(val: u8) -> f32 {
-    1.0 - 2.0 * (val as f32) / 15.0
+const FALLOFF_FACTOR: f32 = 2.0;
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct DAC {
+    enabled: bool,
+    output: f32,
+}
+
+impl DAC {
+    fn convert(&mut self, channel_enabled: bool, input: u8) -> f32 {
+        if self.enabled && channel_enabled {
+            // TODO: smooth transition old output to new input?
+            self.output = 1.0 - 2.0 * (input as f32) / 15.0;
+        } else {
+            self.output /= FALLOFF_FACTOR;
+        }
+        self.output
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct LengthUnit<const LIMIT: usize> {
+    enabled: bool,
+    count: u16,
+}
+
+impl<const LIMIT: usize> LengthUnit<LIMIT> {
+    fn set_count(&mut self, v: u8) {
+        self.count = (LIMIT - (v as usize)) as u16;
+    }
+
+    fn trigger(&mut self) {
+        if self.count == 0 {
+            self.count = LIMIT as u16;
+        }
+    }
+
+    fn tick(&mut self, clock: u64, unit_enabled: &mut bool) {
+        if self.enabled && clock % (MAIN_CLOCK_FREQUENCY / 256) == 0 {
+            if self.count == 0 {
+                return;
+            }
+            self.count -= 1;
+            if self.count == 0 {
+                *unit_enabled = false;
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct EnvelopeUnit {
     volume: u8,
     increase: bool,
-    sweep_pace: u8,
+    pace: u8,
 }
 
 impl EnvelopeUnit {
     fn tick(&mut self, clock: u64) {
-        if clock % (MAIN_CLOCK_FREQUENCY / 64) != 0 {
-            return;
-        }
-        let envelope_ticks = clock / (MAIN_CLOCK_FREQUENCY / 64);
-        let pace = self.sweep_pace as u64;
-        if pace == 0 || envelope_ticks % pace != 0 {
-            return;
-        }
-        if self.increase {
-            if self.volume != 0xF {
-                self.volume += 1;
+        if clock % (MAIN_CLOCK_FREQUENCY / 64) == 0 {
+            if self.pace == 0 {
+                return;
             }
-        } else {
-            if self.volume != 0 {
-                self.volume -= 1;
+            let envelope_ticks = clock / (MAIN_CLOCK_FREQUENCY / 64);
+            let pace = self.pace as u64;
+            if envelope_ticks % pace != 0 {
+                return;
+            }
+            self.volume = match (self.increase, self.volume) {
+                (true, 0xF) => 0xF,
+                (false, 0x0) => 0x0,
+                (true, v) => v + 1,
+                (false, v) => v - 1,
+            };
+        }
+    }
+
+    fn trigger(&mut self, pace: u8, volume: u8) {
+        self.pace = pace;
+        self.volume = volume;
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct FrequencyUnit {
+    enabled: bool,
+    negate: bool,
+    shadow_period: u16,
+    shift: u8,
+    pace: u8,
+}
+
+impl FrequencyUnit {
+    fn trigger(&mut self, regs: &Registers) {
+        self.pace = (regs.read(reg::NR10) >> 4) & 0b111;
+        self.negate = crate::utils::bit_set(regs.read(reg::NR10), 3);
+        self.shift = regs.read(reg::NR10) & 0b111;
+        self.enabled = self.pace != 0 || self.shift != 0;
+        if self.enabled {
+            self.shadow_period = regs.channel_period(1);
+            self.compute_next_period();
+        }
+    }
+
+    fn compute_next_period(&mut self) -> Option<u16> {
+        let current_period = self.shadow_period;
+        let next_period = match self.negate {
+            true => current_period - (current_period >> self.shift),
+            false => current_period + (current_period >> self.shift),
+        };
+        if next_period > 0x7FF {
+            return None;
+        }
+        self.shadow_period = next_period;
+        Some(self.shadow_period)
+    }
+
+    fn tick(
+        &mut self,
+        clock: u64,
+        channel_enabled: &mut bool,
+        period: &mut u16,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        if clock % (MAIN_CLOCK_FREQUENCY / 128) == 0 {
+            let sweep_ticks = clock / (MAIN_CLOCK_FREQUENCY / 128);
+            let pace = self.pace as u64;
+            if sweep_ticks % pace != 0 {
+                return;
+            }
+            if let Some(next) = self.compute_next_period() {
+                *period = next;
+            } else {
+                *channel_enabled = false;
             }
         }
     }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct SquareGenerationCircuit {
+struct SquareCircuit<const SWEEP: bool> {
     enabled: bool,
+    dac: DAC,
 
-    length_timer: u8,
-    length_enabled: bool,
+    length_unit: LengthUnit<64>,
 
     duty_cycle: u8,
     duty_counter: u8,
 
     period: u16,
-    freq_sweep_pace: u8,
+    freq_unit: FrequencyUnit,
 
     envelope: EnvelopeUnit,
 }
 
-impl SquareGenerationCircuit {
-    fn trigger(&mut self) {
+const SQUARE_WAVES: [[u8; 8]; 4] = [
+    /* Duty 0 */ [0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1],
+    /* Duty 1 */ [0x1, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1],
+    /* Duty 2 */ [0x1, 0x0, 0x0, 0x0, 0x0, 0x1, 0x1, 0x1],
+    /* Duty 3 */ [0x0, 0x1, 0x1, 0x1, 0x1, 0x1, 0x1, 0x0],
+];
+
+impl<const SWEEP: bool> SquareCircuit<SWEEP> {
+    fn trigger(&mut self, regs: &Registers) {
         self.enabled = true;
-        self.duty_counter = 0;
+        self.length_unit.trigger();
+
+        let channel = if SWEEP { 1 } else { 2 };
+        self.period = regs.channel_period(channel);
+        self.envelope.trigger(
+            regs.channel_envelope_pace(channel),
+            regs.channel_envelope_volume(channel),
+        );
+        if SWEEP {
+            self.freq_unit.trigger(regs);
+        }
     }
 
     fn tick(&mut self, clock: u64) -> f32 {
-        if self.length_enabled && clock % (MAIN_CLOCK_FREQUENCY / 256) == 0 {
-            if self.length_timer == 64 {
-                self.enabled = false;
-            } else {
-                self.length_timer += 1;
-            }
-        }
-        if !self.enabled {
-            return 0.0;
-        }
-
         let period = self.period as u64;
         if period == 0 {
             return 0.0;
         }
 
-        self.envelope.tick(clock);
-
-        let sample_period = 2048 - (self.period as u64);
+        if SWEEP {
+            self.freq_unit
+                .tick(clock, &mut self.enabled, &mut self.period);
+        }
+        let sample_period = 2048 - self.period as u64;
         if clock % sample_period == 0 {
             self.duty_counter += 1;
             if self.duty_counter == 8 {
                 self.duty_counter = 0;
             }
         }
+        self.length_unit.tick(clock, &mut self.enabled);
+        self.envelope.tick(clock);
 
         let waveform =
             SQUARE_WAVES[self.duty_cycle as usize][self.duty_counter as usize];
+        self.dac
+            .convert(self.enabled, waveform * self.envelope.volume)
+    }
+}
 
-        let attenuation = (self.envelope.volume as f32) / (0xF as f32);
-        waveform * attenuation
+impl<const SWEEP: bool> crate::utils::Dump for SquareCircuit<SWEEP> {
+    fn dump<W: std::fmt::Write>(&self, out: &mut W) -> std::fmt::Result {
+        writeln!(out, "{self:#?}")
     }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub struct WaveGenerationCircuit {
+pub struct WaveCircuit {
     enabled: bool,
+    dac: DAC,
     sample_index: u8,
-    length_timer: u8,
-    length_enabled: bool,
+    length_unit: LengthUnit<256>,
     volume_code: u8,
     period: u16,
     pattern: [u8; CHANNEL_3_TABLE_SIZE],
 }
 
-impl WaveGenerationCircuit {
-    fn trigger(&mut self, pattern: &[u8; 16]) {
+impl WaveCircuit {
+    fn trigger(&mut self, regs: &Registers) {
         self.enabled = true;
         self.sample_index = 0;
-        self.pattern = *pattern;
+        self.pattern = *regs.channel_3_wave_table();
+        self.period = regs.channel_period(3);
+        self.length_unit.trigger();
     }
 
     fn tick(&mut self, clock: u64) -> f32 {
-        if self.length_enabled && clock % (MAIN_CLOCK_FREQUENCY / 256) == 0 {
-            if self.length_timer == 64 {
-                self.enabled = false;
-            } else {
-                self.length_timer += 1;
-            }
-        }
-        if !self.enabled {
-            return 0.0;
-        }
-
         let period = self.period as usize;
         if period == 0 {
             return 0.0;
         }
 
-        // TODO: WRONG
         let sample_period = 2048 - (self.period as u64);
         if clock % sample_period == 0 {
             self.sample_index += 1;
@@ -221,130 +325,242 @@ impl WaveGenerationCircuit {
             1 => self.pattern[sample_num] >> 4,
             _ => unreachable!(),
         };
-        let attenuation_shift = match self.volume_code {
+        let attenuation_shift = match self.volume_code & 0b11 {
             0b00 => 4,
             0b01 => 0,
             0b10 => 1,
             0b11 => 2,
             _ => unreachable!(),
         };
-        waveform_to_float(waveform >> attenuation_shift)
+        self.length_unit.tick(clock, &mut self.enabled);
+
+        self.dac
+            .convert(self.enabled, waveform >> attenuation_shift)
+    }
+}
+
+impl crate::utils::Dump for WaveCircuit {
+    fn dump<W: std::fmt::Write>(&self, out: &mut W) -> std::fmt::Result {
+        writeln!(out, "{self:#?}")
     }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub struct NoiseGenerationCircuit {
+struct LFSR {
+    state: u16,
+    short_mode: bool,
+}
+
+impl LFSR {
+    pub fn tick(&mut self) {
+        let bit0 = crate::utils::get_bit(self.state, 0);
+        let bit1 = crate::utils::get_bit(self.state, 1);
+        let new_top_bit = (!(bit0 ^ bit1)) & 0b1;
+        self.state = crate::utils::set_bit(self.state, 15, new_top_bit);
+        if self.short_mode {
+            self.state = crate::utils::set_bit(self.state, 7, new_top_bit);
+        }
+        self.state >>= 1;
+    }
+
+    fn output(&self) -> u8 {
+        (!crate::utils::bit_set(self.state, 0)) as u8
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct NoiseCircuit {
     enabled: bool,
-    lsfr: u16,
+    dac: DAC,
 
-    length_timer: u8,
-    length_enabled: bool,
+    lfsr: LFSR,
 
+    length_unit: LengthUnit<64>,
     envelope: EnvelopeUnit,
 
-    divisor_code: u8,
+    divider_code: u8,
     shift: u8,
 }
 
-impl NoiseGenerationCircuit {
-    fn trigger(&mut self) {
+impl NoiseCircuit {
+    fn trigger(&mut self, regs: &Registers) {
         self.enabled = true;
-        self.lsfr = 0;
+        self.lfsr.state = 0;
+        self.length_unit.trigger();
+        self.envelope.trigger(
+            regs.channel_envelope_pace(4),
+            regs.channel_envelope_volume(4),
+        );
     }
 
     fn tick(&mut self, clock: u64) -> f32 {
-        if self.length_enabled && clock % (MAIN_CLOCK_FREQUENCY / 256) == 0 {
-            if self.length_timer == 64 {
-                self.enabled = false;
-            } else {
-                self.length_timer += 1;
-            }
-        }
-        if !self.enabled {
-            return 0.0;
-        }
-
-        self.envelope.tick(clock);
-
-        let divisor = match self.divisor_code {
-            0b000 => 8,
-            0b001 => 16,
-            0b010 => 32,
-            0b011 => 48,
-            0b100 => 64,
-            0b101 => 80,
-            0b110 => 96,
-            0b111 => 112,
-            _ => unreachable!(),
+        // LFSR frequency is (M / 4) / (R * 2^S) where
+        //    M = main clock frequency
+        //    R = divider code (where 0 => 1/2)
+        //    S = clock shift
+        const BASE_FREQUENCY: u64 = MAIN_CLOCK_FREQUENCY / 4;
+        let frequency = match self.divider_code & 0b111 {
+            0 => 2 * BASE_FREQUENCY / (1 << self.shift),
+            r => BASE_FREQUENCY / ((1 << self.shift) * (r as u64)),
         };
 
-        let period = (MAIN_CLOCK_FREQUENCY / 4) / (divisor * (1 << self.shift));
-        if clock % period == 0 {
-            let lsfr_0 = (self.lsfr >> 0) & 0b1;
-            let lsfr_1 = (self.lsfr >> 1) & 0b1;
-            let new_top_bit = !(lsfr_0 ^ lsfr_1) & 0b1;
-            self.lsfr = crate::utils::set_bit(self.lsfr, 15, new_top_bit) >> 1;
+        if clock % (MAIN_CLOCK_FREQUENCY / frequency) == 0 {
+            self.lfsr.tick();
         }
+        let waveform = self.lfsr.output() * self.envelope.volume;
 
-        if crate::utils::bit_set(self.lsfr, 0) {
-            waveform_to_float(crate::utils::get_bit(self.lsfr, 0) as u8)
-        } else {
-            0.0
+        self.length_unit.tick(clock, &mut self.enabled);
+        self.envelope.tick(clock);
+
+        self.dac.convert(self.enabled, waveform)
+    }
+}
+
+impl crate::utils::Dump for NoiseCircuit {
+    fn dump<W: std::fmt::Write>(&self, out: &mut W) -> std::fmt::Result {
+        writeln!(out, "{self:#?}")
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+struct Registers {
+    data: Mem<{ 0xFF40 - 0xFF10 }>,
+}
+
+impl Registers {
+    fn read(&self, address: u16) -> u8 {
+        self.data[address - 0xFF10]
+    }
+
+    fn write(&mut self, address: u16, val: u8) {
+        self.data[address - 0xFF10] = val;
+    }
+
+    fn clear(&mut self) {
+        self.data.clear();
+    }
+
+    fn channel_3_wave_table(&self) -> &[u8; 16] {
+        self.data
+            .slice_n::<CHANNEL_3_TABLE_SIZE>(CHANNEL_3_TABLE_START - REGS_START)
+    }
+
+    fn channel_envelope_volume(&self, channel: usize) -> u8 {
+        match channel {
+            1 => self.read(reg::NR12) >> 4,
+            2 => self.read(reg::NR22) >> 4,
+            4 => self.read(reg::NR42) >> 4,
+            _ => unreachable!(),
         }
+    }
+
+    fn channel_envelope_pace(&self, channel: usize) -> u8 {
+        match channel {
+            1 => self.read(reg::NR12) & 0b111,
+            2 => self.read(reg::NR22) & 0b111,
+            4 => self.read(reg::NR42) & 0b111,
+            _ => unreachable!(),
+        }
+    }
+
+    fn channel_period(&self, channel: usize) -> u16 {
+        match channel {
+            1 => u16::from_le_bytes([
+                self.read(reg::NR13),
+                self.read(reg::NR14) & 0b111,
+            ]),
+            2 => u16::from_le_bytes([
+                self.read(reg::NR23),
+                self.read(reg::NR24) & 0b111,
+            ]),
+            3 => u16::from_le_bytes([
+                self.read(reg::NR33),
+                self.read(reg::NR34) & 0b111,
+            ]),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct HighPassFilter {
+    capacitor: f32,
+    charge_factor: f32,
+}
+
+impl HighPassFilter {
+    fn reset(&mut self) {
+        self.capacitor = 0.0;
+    }
+
+    fn set_charge_factor_from_output_sample_rate(&mut self, rate: usize) {
+        self.charge_factor = 0.999958f32
+            .powi((crate::cpu::M_CLOCK_FREQUENCY / (rate as u64)) as i32);
+    }
+
+    fn filter(&mut self, dacs_enabled: bool, input: f32) -> f32 {
+        let mut output = 0.0;
+        if dacs_enabled {
+            output = input - self.capacitor;
+            self.capacitor = input - output * self.charge_factor;
+        }
+        output
     }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct APU {
-    registers: Mem<{ 0xFF40 - 0xFF10 }>,
-    buffer: Vec<f32>,
-    sample_num: u64,
-    samples_ready: usize,
     clock: u64,
-    channel1: SquareGenerationCircuit,
-    channel2: SquareGenerationCircuit,
-    channel3: WaveGenerationCircuit,
-    channel4: NoiseGenerationCircuit,
+    buffer: Vec<f32>,
+    num_channels: usize,
+    regs: Registers,
+    sample_num: usize,
+    samples_ready: usize,
     last_rendered_sample: usize,
+    channel1: SquareCircuit</*SWEEP=*/ true>,
+    channel2: SquareCircuit</*SWEEP=*/ false>,
+    channel3: WaveCircuit,
+    channel4: NoiseCircuit,
+    high_pass_left: HighPassFilter,
+    high_pass_right: HighPassFilter,
+    external_volumes: [f32; 5],
 }
 
 impl APU {
     pub fn reset(&mut self) {
-        self.registers.clear();
+        self.clock = 0;
+        self.regs.clear();
         self.buffer.fill(0.0);
         self.sample_num = 0;
+        self.samples_ready = 0;
+        self.last_rendered_sample = 0;
         self.channel1 = Default::default();
         self.channel2 = Default::default();
         self.channel3 = Default::default();
         self.channel4 = Default::default();
-    }
-
-    fn read_reg(&self, address: u16) -> u8 {
-        self.registers[address - 0xFF10]
-    }
-
-    fn write_reg(&mut self, address: u16, val: u8) {
-        self.registers[address - 0xFF10] = val;
+        self.high_pass_left.reset();
+        self.high_pass_right.reset();
     }
 
     fn is_powered_on(&self) -> bool {
-        crate::utils::bit_set(self.read_reg(regs::NR52), 7)
+        crate::utils::bit_set(self.regs.read(reg::NR52), 7)
     }
 
-    fn sample_rate(&self) -> u64 {
-        (self.buffer.len() / NUM_OUTPUT_CHANNELS) as u64
+    fn sample_rate(&self) -> usize {
+        self.buffer.len() / self.num_channels
     }
 
     fn sample_period(&self) -> u64 {
-        MAIN_CLOCK_FREQUENCY / self.sample_rate()
+        MAIN_CLOCK_FREQUENCY / (self.sample_rate() as u64)
     }
 
-    pub fn tick(&mut self) {
-        if self.sample_rate() == 0 {
+    pub fn tick(&mut self, div_tick: bool) {
+        if self.num_channels == 0 || self.sample_rate() == 0 {
             return;
         }
 
-        let pan = self.read_reg(regs::NR51);
+        let pan = self.regs.read(reg::NR51);
         let panned = |left: usize, right: usize, output: f32| {
             (
                 if crate::utils::bit_set(pan, left) {
@@ -369,161 +585,200 @@ impl APU {
         let (channel_4_left, channel_4_right) =
             panned(7, 3, self.channel4.tick(self.clock));
 
-        let nr52 = self.read_reg(regs::NR52);
-        let status = ((self.channel3.enabled as u8) << 2)
+        let nr52 = self.regs.read(reg::NR52);
+        let status = ((self.channel4.enabled as u8) << 3)
+            | ((self.channel3.enabled as u8) << 2)
             | ((self.channel2.enabled as u8) << 1)
             | ((self.channel1.enabled as u8) << 0);
-        self.write_reg(regs::NR52, (nr52 & !(0b1111)) | status);
+        self.regs.write(reg::NR52, (nr52 & !(0b1111)) | status);
 
         self.clock = self.clock.wrapping_add(1);
         if self.clock % self.sample_period() != 0 {
             return;
         }
 
-        let (left_channel, right_channel) = {
-            (
-                (channel_1_left
-                    + channel_2_left
-                    + channel_3_left
-                    + channel_4_left)
-                    / 4.0,
-                (channel_1_right
-                    + channel_2_right
-                    + channel_3_right
-                    + channel_4_right)
-                    / 4.0,
-            )
-        };
+        let (left_vol, right_vol) = (
+            (self.regs.read(reg::NR50) >> 4) & 0b111,
+            (self.regs.read(reg::NR50) >> 0) & 0b111,
+        );
 
-        // 2 channels interleaved [L, R, L, R, ...]
-        self.buffer[(2 * self.sample_num) as usize] = left_channel;
-        self.buffer[(2 * self.sample_num + 1) as usize] = right_channel;
+        let ext_vol_percent =
+            |n: usize| -> f32 { self.external_volumes[n] / 100.0 };
+        let mix = |ch1: f32, ch2: f32, ch3: f32, ch4: f32, volume: u8| {
+            let channels = (ch1 * ext_vol_percent(1)
+                + ch2 * ext_vol_percent(2)
+                + ch3 * ext_vol_percent(3)
+                + ch4 * ext_vol_percent(4))
+                / 4.0;
+            let amplification_factor = (volume as f32 + 1.0) / 8.0;
+            channels * amplification_factor * ext_vol_percent(0)
+        };
+        let dacs_enabled = self.channel1.dac.enabled
+            || self.channel2.dac.enabled
+            || self.channel3.dac.enabled
+            || self.channel4.dac.enabled;
+        let (left, right) = (
+            self.high_pass_left.filter(
+                dacs_enabled,
+                mix(
+                    channel_1_left,
+                    channel_2_left,
+                    channel_3_left,
+                    channel_4_left,
+                    left_vol,
+                ),
+            ),
+            self.high_pass_right.filter(
+                dacs_enabled,
+                mix(
+                    channel_1_right,
+                    channel_2_right,
+                    channel_3_right,
+                    channel_4_right,
+                    right_vol,
+                ),
+            ),
+        );
+
+        match self.num_channels {
+            1 => {
+                self.buffer[self.sample_num] = (left + right) / 2.0;
+            }
+            2 => {
+                // 2 channels interleaved [L, R, L, R, ...]
+                self.buffer[2 * self.sample_num + 0] = left;
+                self.buffer[2 * self.sample_num + 1] = right;
+            }
+            _ => unreachable!(),
+        }
         self.sample_num += 1;
         if self.sample_num == self.sample_rate() {
             self.sample_num = 0;
         }
-        self.samples_ready += 2;
+        self.samples_ready += self.num_channels;
     }
 
-    pub fn set_sample_rate(&mut self, rate: usize) {
+    pub fn init(&mut self, sample_rate: usize, channels: usize) {
+        assert!(
+            channels == 1 || channels == 2,
+            "can only support mono/stereo configs!"
+        );
         self.buffer.clear();
-        self.buffer.resize(rate * NUM_OUTPUT_CHANNELS, 0.0);
+        self.buffer.resize(sample_rate * channels, 0.0);
+        self.num_channels = channels;
+        self.high_pass_left
+            .set_charge_factor_from_output_sample_rate(sample_rate);
+        self.high_pass_right
+            .set_charge_factor_from_output_sample_rate(sample_rate);
     }
 
     pub fn load(&self, address: u16) -> u8 {
-        self.read_reg(address)
+        let val = self.regs.read(address);
+        //crate::debug_log!("loaded {address:04X} = {val:02X}");
+        val
     }
 
     pub fn store(&mut self, address: u16, val: u8) {
-        self.write_reg(address, val);
+        if !self.is_powered_on() && address != reg::NR52 {
+            // TODO should still be able to write length counters
+            return;
+        }
+        self.regs.write(address, val);
         match address {
-            regs::NR11 => {
+            reg::NR11 => {
                 self.channel1.duty_cycle = val >> 6;
-                self.channel1.length_timer = val & 0b0011_1111;
+                self.channel1.length_unit.set_count(val & 0b0011_1111);
             }
-            regs::NR21 => {
+            reg::NR21 => {
                 self.channel2.duty_cycle = val >> 6;
-                self.channel2.length_timer = val & 0b0011_1111;
+                self.channel2.length_unit.set_count(val & 0b0011_1111);
             }
-            regs::NR12 => {
+            reg::NR12 => {
                 self.channel1.envelope.volume = val >> 4;
                 self.channel1.envelope.increase = crate::utils::bit_set(val, 3);
-                self.channel1.envelope.sweep_pace = val & 0b111;
-                if self.channel1.envelope.volume == 0 {
-                    self.channel1.enabled = false;
-                }
+                self.channel1.envelope.pace = val & 0b111;
+                self.channel1.dac.enabled = self.channel1.envelope.volume != 0
+                    || self.channel1.envelope.increase;
             }
-            regs::NR22 => {
+            reg::NR22 => {
                 self.channel2.envelope.volume = val >> 4;
                 self.channel2.envelope.increase = crate::utils::bit_set(val, 3);
-                self.channel2.envelope.sweep_pace = val & 0b111;
-                if self.channel2.envelope.volume == 0 {
-                    self.channel2.enabled = false;
+                self.channel2.envelope.pace = val & 0b111;
+                self.channel2.dac.enabled = self.channel2.envelope.volume != 0
+                    || self.channel2.envelope.increase;
+            }
+            reg::NR14 => {
+                self.channel1.length_unit.enabled =
+                    crate::utils::bit_set(val, 6);
+                if self.channel1.dac.enabled && crate::utils::bit_set(val, 7) {
+                    self.channel1.trigger(&self.regs);
                 }
             }
-            regs::NR13 => {
-                self.channel1.period =
-                    (self.channel1.period & 0xFF00) | (val as u16);
-            }
-            regs::NR23 => {
-                self.channel2.period =
-                    (self.channel2.period & 0xFF00) | (val as u16);
-            }
-            regs::NR14 => {
-                self.channel1.period = (self.channel1.period & 0x00FF)
-                    | (((val & 0b111) as u16) << 8);
-                self.channel1.length_enabled = crate::utils::bit_set(val, 6);
-                if crate::utils::bit_set(val, 7) {
-                    self.channel1.trigger();
-                    crate::debug_log!("channel 1 triggered!");
-                    crate::debug_log!("{:#?}", self.channel1);
+            reg::NR24 => {
+                self.channel2.length_unit.enabled =
+                    crate::utils::bit_set(val, 6);
+                if self.channel2.dac.enabled && crate::utils::bit_set(val, 7) {
+                    self.channel2.trigger(&self.regs);
                 }
             }
-            regs::NR24 => {
-                self.channel2.period = (self.channel2.period & 0x00FF)
-                    | (((val & 0b111) as u16) << 8);
-                self.channel2.length_enabled = crate::utils::bit_set(val, 6);
-                if crate::utils::bit_set(val, 7) {
-                    self.channel2.trigger();
-                    crate::debug_log!("channel 2 triggered!");
-                    crate::debug_log!("{:#?}", self.channel2);
-                }
+            reg::NR13 => {
+                self.channel1.period = self.regs.channel_period(1);
             }
-            regs::NR30 => {
-                self.channel3.enabled = crate::utils::bit_set(val, 7);
+            reg::NR23 => {
+                self.channel2.period = self.regs.channel_period(2);
             }
-            regs::NR31 => {
-                self.channel3.length_timer = val;
+            reg::NR33 => {
+                self.channel3.period = self.regs.channel_period(3);
             }
-            regs::NR32 => {
+            reg::NR30 => {
+                self.channel3.dac.enabled = crate::utils::bit_set(val, 7);
+            }
+            reg::NR31 => {
+                self.channel3.length_unit.set_count(val);
+            }
+            reg::NR32 => {
                 self.channel3.volume_code = (val >> 4) & 0b11;
             }
-            regs::NR33 => {
-                self.channel3.period =
-                    (self.channel3.period & 0xFF00) | (val as u16);
-            }
-            regs::NR34 => {
-                self.channel3.period = (self.channel3.period & 0x00FF)
-                    | (((val & 0b111) as u16) << 8);
-                self.channel3.length_enabled = crate::utils::bit_set(val, 6);
-                if crate::utils::bit_set(val, 7) {
-                    self.channel3.trigger(
-                        self.registers.slice_n::<CHANNEL_3_TABLE_SIZE>(
-                            CHANNEL_3_TABLE_START - REGS_START,
-                        ),
-                    );
-                    crate::debug_log!("channel 3 triggered!");
-                    crate::debug_log!("{:#?}", self.channel3);
+            reg::NR34 => {
+                self.channel3.length_unit.enabled =
+                    crate::utils::bit_set(val, 6);
+                if self.channel3.dac.enabled && crate::utils::bit_set(val, 7) {
+                    self.channel3.trigger(&self.regs);
                 }
             }
-            regs::NR41 => {
-                self.channel4.length_timer = val & 0b0011_1111;
+            reg::NR41 => {
+                self.channel4.length_unit.set_count(val & 0b0011_1111);
             }
-            regs::NR42 => {
+            reg::NR42 => {
                 self.channel4.envelope.volume = val >> 4;
                 self.channel4.envelope.increase = crate::utils::bit_set(val, 3);
-                self.channel4.envelope.sweep_pace = val & 0b111;
-                if self.channel4.envelope.volume == 0 {
-                    self.channel4.enabled = false;
-                }
+                self.channel4.envelope.pace = val & 0b111;
+                self.channel4.dac.enabled = self.channel4.envelope.volume != 0
+                    || self.channel4.envelope.increase;
             }
-            regs::NR43 => {
-                self.channel4.divisor_code = val & 0b111;
+            reg::NR43 => {
+                self.channel4.divider_code = val & 0b111;
+                self.channel4.lfsr.short_mode = crate::utils::bit_set(val, 3);
                 self.channel4.shift = val >> 4;
             }
-            regs::NR44 => {
-                self.channel4.length_enabled = crate::utils::bit_set(val, 6);
+            reg::NR44 => {
+                self.channel4.length_unit.enabled =
+                    crate::utils::bit_set(val, 6);
                 if crate::utils::bit_set(val, 7) {
-                    self.channel4.trigger();
-                    crate::debug_log!("channel 4 triggered!");
-                    crate::debug_log!("{:#?}", self.channel4);
+                    self.channel4.trigger(&self.regs);
+                }
+            }
+            reg::NR52 => {
+                if !self.is_powered_on() {
+                    self.regs.clear();
                 }
             }
             _ => {}
         }
     }
 
-    pub fn render(&mut self, data: &mut [f32]) {
+    pub fn render(&mut self, data: &mut [f32], external_volumes: &[f32; 5]) {
+        self.external_volumes = *external_volumes;
         if self.samples_ready < data.len() {
             return;
         }
@@ -557,15 +812,14 @@ impl crate::utils::Dump for APU {
         writeln!(out, "SAMPLE RATE (EXT): {}", self.sample_rate())?;
         writeln!(out, "SAMPLE NUM: {}", self.sample_num)?;
         writeln!(out, "LAST SAMPLE: {}", self.last_rendered_sample)?;
-        writeln!(out, "BUF:")?;
-        writeln!(out, "{:?}", &self.buffer[00..08])?;
-        writeln!(out, "{:?}", &self.buffer[08..16])?;
-        writeln!(out, "{:?}", &self.buffer[16..24])?;
-        writeln!(out, "{:?}", &self.buffer[24..32])?;
-        writeln!(out, "{:?}", &self.buffer[32..40])?;
-        writeln!(out, "{:?}", &self.buffer[40..48])?;
-        writeln!(out, "{:?}", &self.buffer[48..56])?;
-        writeln!(out, "{:?}", &self.buffer[56..64])?;
+        writeln!(out, "CHANNEL 1")?;
+        self.channel1.dump(out)?;
+        writeln!(out, "CHANNEL 2")?;
+        self.channel2.dump(out)?;
+        writeln!(out, "CHANNEL 3")?;
+        self.channel3.dump(out)?;
+        writeln!(out, "CHANNEL 4")?;
+        self.channel4.dump(out)?;
         Ok(())
     }
 }

@@ -124,7 +124,6 @@ enum ObjSize {
 
 pub type ScreenBuffer = Mem<{ SCREEN_WIDTH * SCREEN_HEIGHT }>;
 pub trait ExternalScreenBuffer {
-    const NUM_RAW_PIXELS: usize;
     fn write_pixel(&mut self, idx: usize, raw_pixel: u8);
     fn slice(&self, start: usize, end: usize) -> &[u8];
 }
@@ -167,24 +166,28 @@ impl LCDController {
         self.stat_signal = false;
     }
 
+    #[inline]
     fn write_reg(&mut self, reg: u16, val: u8) {
         self.registers[(reg - 0xFF40) as usize] = val;
     }
 
+    #[inline]
     fn read_reg(&self, reg: u16) -> u8 {
         self.registers[(reg - 0xFF40) as usize]
     }
 
+    #[inline]
     fn set_mode(&mut self, mode: u8) {
         let stat = self.read_reg(reg::STAT) & 0b11111100;
         self.write_reg(reg::STAT, stat | mode);
     }
 
-    pub(crate) fn mode(&self) -> u8 {
+    #[inline]
+    fn mode(&self) -> u8 {
         self.read_reg(reg::STAT) & 0b00000011
     }
 
-    pub fn tick(&mut self, interrupts: &mut crate::io::Interrupts) {
+    pub fn tick(&mut self, interrupts: &mut crate::cpu::Interrupts) {
         let stat_interrupt_on_lyc = utils::bit_set(self.read_reg(reg::STAT), 6);
         let stat_interrupt_on_mode2 =
             utils::bit_set(self.read_reg(reg::STAT), 5);
@@ -226,10 +229,11 @@ impl LCDController {
                 }
             }
             // Last VBlank line
-            LAST_SCANLINE => match clock {
-                1 => self.write_reg(reg::LY, 0),
-                _ => {}
-            },
+            LAST_SCANLINE => {
+                if clock == 1 {
+                    self.write_reg(reg::LY, 0);
+                }
+            }
             _ => {}
         };
 
@@ -262,26 +266,32 @@ impl LCDController {
         self.oam[offset] = byte;
     }
 
+    #[inline]
     fn lcd_display_enabled(&self) -> bool {
         utils::bit_set(self.read_reg(reg::LCDC), 7)
     }
 
+    #[inline]
     fn window_enabled(&self) -> bool {
         utils::bit_set(self.read_reg(reg::LCDC), 5)
     }
 
+    #[inline]
     fn bg_and_window_enabled(&self) -> bool {
         utils::bit_set(self.read_reg(reg::LCDC), 0)
     }
 
+    #[inline]
     fn oam_is_inaccessible(&self) -> bool {
         self.lcd_display_enabled() && (self.mode() == 2 || self.mode() == 3)
     }
 
+    #[inline]
     fn obj_enabled(&self) -> bool {
         utils::bit_set(self.read_reg(reg::LCDC), 1)
     }
 
+    #[inline]
     fn obj_size(&self) -> ObjSize {
         match utils::bit_set(self.read_reg(reg::LCDC), 2) {
             false => ObjSize::Normal,
@@ -289,10 +299,12 @@ impl LCDController {
         }
     }
 
+    #[inline]
     fn vram_is_inaccessible(&self) -> bool {
         self.lcd_display_enabled() && self.mode() == 3
     }
 
+    #[inline]
     pub fn load(&self, address: u16) -> u8 {
         match address {
             reg::DMA => panic!("should be handled by MMU!"),
@@ -306,6 +318,7 @@ impl LCDController {
         }
     }
 
+    #[inline]
     pub fn store(&mut self, address: u16, val: u8) {
         match address {
             reg::STAT => {
@@ -405,6 +418,7 @@ impl LCDController {
         }
     }
 
+    #[inline]
     fn reg_to_palette(reg: u8) -> [u8; 4] {
         [
             (reg >> 0) & 0b11, // COLOR NUM 0 (WHITE)
@@ -711,6 +725,7 @@ impl LCDController {
         palette[color_num as usize]
     }
 
+    #[inline]
     fn tile_address_mode(&self) -> TileAddressMode {
         match utils::bit_set(self.read_reg(reg::LCDC), 4) {
             false => TileAddressMode::Signed,
@@ -719,6 +734,7 @@ impl LCDController {
     }
 }
 
+#[inline]
 fn color_bit_in_tile(tile: &[u8], n: usize, offset: usize) -> u8 {
     // Start the numbering at the MSB of the 0th byte, proceeding down to the
     // LSB of the 0th byte, then advance to the MSB of the 2nd byte, and so on
@@ -732,6 +748,7 @@ fn color_bit_in_tile(tile: &[u8], n: usize, offset: usize) -> u8 {
     utils::get_bit(tile[byte + offset], bit)
 }
 
+#[inline]
 fn pixel_color_num_in_tile(tile: &[u8], pixel: usize) -> u8 {
     (color_bit_in_tile(tile, pixel, 1) << 1) | color_bit_in_tile(tile, pixel, 0)
 }
@@ -892,20 +909,23 @@ mod tests {
 
     #[test]
     fn vblank_interrupt_is_triggered() {
-        let mut cpu = crate::CPU::new();
-        cpu.stop();
+        let mut ppu = LCDController::default();
         // First enable LCD power
-        cpu.mmu.store8_unchecked(reg::LCDC, 0x80);
-        assert_eq!(cpu.mmu.io.lcd.mode(), 0);
+        ppu.write_reg(reg::LCDC, 0x80);
+        assert_eq!(ppu.mode(), 0);
         // Simulate 144 lines before VBlank
+        let mut interrupts = crate::cpu::Interrupts::default();
         for _ in 0..144 {
             for _ in 0..CLOCKS_PER_SCANLINE {
-                cpu.tick();
+                ppu.tick(&mut interrupts);
             }
         }
-        assert_eq!(cpu.mmu.io.lcd.mode(), 0);
-        cpu.tick();
-        assert_eq!(cpu.mmu.io.lcd.mode(), 1);
-        assert_eq!(cpu.mmu.load8(crate::cpu::regs::IF) & 0x1, 0x1);
+        // Should be right before VBlank, but not quite there yet
+        assert!(!interrupts.vblank_requested());
+        assert_eq!(ppu.mode(), 0);
+        ppu.tick(&mut interrupts);
+        ppu.tick(&mut interrupts);
+        assert_eq!(ppu.mode(), 1);
+        assert!(interrupts.vblank_requested());
     }
 }

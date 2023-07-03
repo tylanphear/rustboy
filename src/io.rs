@@ -8,29 +8,6 @@ use ppu::LCDController;
 use serde::{Deserialize, Serialize};
 use timer::Timer;
 
-#[derive(Default)]
-pub struct Interrupts(u8);
-impl Interrupts {
-    pub fn request_vblank(&mut self) {
-        self.0 |= 1 << 0;
-    }
-    pub fn request_lcd_stat(&mut self) {
-        self.0 |= 1 << 1;
-    }
-    pub fn request_timer(&mut self) {
-        self.0 |= 1 << 2;
-    }
-    pub fn request_joypad(&mut self) {
-        self.0 |= 1 << 4;
-    }
-    pub fn any_requested(&self) -> bool {
-        self.0 != 0
-    }
-    pub fn mask(&self) -> u8 {
-        self.0
-    }
-}
-
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct IOController {
     pub lcd: LCDController,
@@ -46,12 +23,17 @@ impl IOController {
         self.apu.reset();
     }
 
-    pub fn tick(&mut self) -> Interrupts {
-        let mut interrupts = Interrupts::default();
+    pub fn tick(&mut self) -> crate::cpu::Interrupts {
+        let mut interrupts = crate::cpu::Interrupts::default();
+        let old_div = self.timer.load(timer::regs::DIV);
         self.lcd.tick(&mut interrupts);
         self.timer.tick(&mut interrupts);
         self.joypad.tick(&mut interrupts);
-        self.apu.tick();
+        let new_div = self.timer.load(timer::regs::DIV);
+        self.apu.tick(
+            crate::utils::get_bit(old_div, 4) == 1
+                && crate::utils::get_bit(new_div, 4) == 0,
+        );
         interrupts
     }
 

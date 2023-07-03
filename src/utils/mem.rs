@@ -12,7 +12,7 @@ impl<const SIZE: usize> Mem<SIZE> {
     }
 
     #[inline]
-    pub fn size(&self) -> usize {
+    pub fn len(&self) -> usize {
         SIZE
     }
 
@@ -33,13 +33,13 @@ impl<const SIZE: usize> Mem<SIZE> {
 
     #[inline]
     pub fn safe_slice(&self, addr: usize, n: usize) -> &[u8] {
-        let safe_len = std::cmp::min(self.size() - addr, n);
+        let safe_len = std::cmp::min(self.len() - addr, n);
         self.slice(addr, safe_len)
     }
 
     #[inline]
     pub fn copy_from_slice(&mut self, data: &[u8]) {
-        assert!(data.len() <= self.size());
+        assert!(data.len() <= self.len());
         self.0.copy_from_slice(data);
     }
 

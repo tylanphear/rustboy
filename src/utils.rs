@@ -12,7 +12,7 @@ pub mod constants {
 #[inline]
 pub(crate) fn get_bit<N>(byte: N, idx: usize) -> N
 where
-    N: num::traits::PrimInt,
+    N: num_traits::PrimInt,
 {
     (byte & (N::one() << idx)) >> idx
 }
@@ -20,7 +20,7 @@ where
 #[inline]
 pub(crate) fn bit_set<N>(byte: N, idx: usize) -> bool
 where
-    N: num::traits::PrimInt,
+    N: num_traits::PrimInt,
 {
     get_bit::<N>(byte, idx) != N::zero()
 }
@@ -31,44 +31,18 @@ pub(crate) fn lo_bits_of(x: usize, n: usize) -> usize {
 }
 
 #[inline]
-pub(crate) fn set_bit<N: num::PrimInt + From<u8>>(
+pub(crate) fn set_bit<N: num_traits::PrimInt + From<u8>>(
     byte: N,
     idx: usize,
-    flag: N,
+    val: N,
 ) -> N {
-    let flag_mask = flag.signed_shl(idx as u32);
+    let flag_mask = val.signed_shl(idx as u32);
     let bit_mask = N::one() << idx;
     (byte & !bit_mask) | (flag_mask & bit_mask)
 }
 
-#[inline]
-pub(crate) fn round_to_nearest_multiple_of(a: usize, n: usize) -> usize {
-    ((a + (n - 1)) / n) * n
-}
-
-pub(crate) fn disp_chunks(
-    block: &[u8],
-    start: usize,
-    chunk_size: usize,
-) -> String {
-    let mut disp = String::from("       ");
-    for idx in 0..chunk_size {
-        disp.push_str(&format!("{:02X}  ", idx));
-    }
-    disp.push('\n');
-    let chunks = block.len() / chunk_size;
-    for n in 0..chunks {
-        let needle = n * chunk_size;
-        disp.push_str(&format!(
-            "{0:04X}: {1:02X?}\n",
-            start + needle,
-            &block[needle..needle + chunk_size]
-        ));
-    }
-    disp
-}
-
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Reg16([u8; 2]);
 
 impl Reg16 {

@@ -5,27 +5,66 @@ use crate::mmu::MMU;
 use crate::opcodes::{self, Op, OpStatus};
 use crate::utils::Regs;
 
-pub mod regs {
-    // Bit 4 - Joypad
-    // Bit 3 - Serial
-    // Bit 2 - Timer
-    // Bit 1 - LCD STAT
-    // Bit 0 - VBlank
+/// M clock (mem/io) clock runs at 4Mhz
+pub const M_CLOCK_FREQUENCY: u64 = 4_194_304;
+/// T clock (cpu/timer) clock runs at 1MHz (1/4 M clock)
+pub const T_CLOCK_FREQUENCY: u64 = M_CLOCK_FREQUENCY / 4;
+
+pub mod reg {
+    /// Bit 4 - Joypad
+    /// Bit 3 - Serial
+    /// Bit 2 - Timer
+    /// Bit 1 - LCD STAT
+    /// Bit 0 - VBlank
     pub const IE: u16 = 0xFFFF;
 
-    // Bit 4 - Joypad
-    // Bit 3 - Serial
-    // Bit 2 - Timer
-    // Bit 1 - LCD STAT
-    // Bit 0 - VBlank
+    /// Bit 4 - Joypad
+    /// Bit 3 - Serial
+    /// Bit 2 - Timer
+    /// Bit 1 - LCD STAT
+    /// Bit 0 - VBlank
     pub const IF: u16 = 0xFF0F;
 }
-use regs::*;
+use reg::*;
+
+#[derive(Default)]
+pub struct Interrupts(u8);
+impl Interrupts {
+    pub fn request_vblank(&mut self) {
+        self.0 |= 1 << 0;
+    }
+    pub fn vblank_requested(&self) -> bool {
+        (self.0 & 1 << 0) != 0
+    }
+    pub fn request_lcd_stat(&mut self) {
+        self.0 |= 1 << 1;
+    }
+    pub fn lcd_requested(&self) -> bool {
+        (self.0 & 1 << 1) != 0
+    }
+    pub fn request_timer(&mut self) {
+        self.0 |= 1 << 2;
+    }
+    pub fn timer_requested(&self) -> bool {
+        (self.0 & 1 << 2) != 0
+    }
+    pub fn request_joypad(&mut self) {
+        self.0 |= 1 << 4;
+    }
+    pub fn joypad_requested(&self) -> bool {
+        (self.0 & 1 << 4) != 0
+    }
+    pub fn any_requested(&self) -> bool {
+        self.0 != 0
+    }
+    pub fn mask(&self) -> u8 {
+        self.0
+    }
+}
 
 #[derive(Default)]
 pub struct Tick {
     pub breakpoint_was_hit: bool,
-    pub op_was_retired: bool,
     pub pc: u16,
 }
 const CYCLES_PER_TICK: u64 = 4;
@@ -58,7 +97,9 @@ impl Breakpoints {
     }
 
     pub fn reset_count(&mut self, addr: u16) {
-        self.addr2hits.get_mut(&addr).map(|count| *count = 0);
+        if let Some(count) = self.addr2hits.get_mut(&addr) {
+            *count = 0;
+        }
     }
 
     fn check_hit(&mut self, addr: &u16) -> bool {
@@ -130,6 +171,11 @@ impl CPU {
         let mut this_tick = Tick::default();
         this_tick.pc = self.regs.pc;
 
+        // Now tick devices (MMU/LCD/Timer) and check for interrupts that need
+        // to be flagged in IF. Do this *before* we possibly dispatch an
+        // interrupt this tick.
+        self.tick_devices_and_check_interrupts();
+
         // Check if we're halted. If so, and there is an interrupt requested,
         // un-halt and continue execution.
         match self.state {
@@ -153,7 +199,6 @@ impl CPU {
                 if self.state != State::Halted {
                     self.state = State::RetiringOp(extra_cycles);
                 }
-                this_tick.op_was_retired = true;
             }
             State::ExecutingOp(ref mut cycles)
             | State::RetiringOp(ref mut cycles)
@@ -184,11 +229,6 @@ impl CPU {
                 this_tick.breakpoint_was_hit = true;
             }
         };
-
-        // Now tick devices (MMU/LCD/Timer) and check for interrupts that need
-        // to be flagged in IF. Do this *before* we possibly dispatch an
-        // interrupt this tick.
-        self.tick_devices_and_check_interrupts();
 
         this_tick
     }

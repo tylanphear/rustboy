@@ -20,19 +20,20 @@ impl Timer {
         *self = Default::default();
     }
 
-    pub fn tick(&mut self, interrupts: &mut crate::io::Interrupts) {
+    pub fn tick(&mut self, interrupts: &mut crate::cpu::Interrupts) {
         self.clock = self.clock.wrapping_add(4);
 
-        let mut need_interrupt = false;
-        if self.enabled() {
-            if self.clock % self.clock_rate() == 0 {
-                let (new_tima, overflowed) = self.tima.overflowing_add(1);
-                if overflowed {
-                    interrupts.request_timer();
-                    self.tima = self.tma;
-                } else {
-                    self.tima = new_tima;
-                }
+        if !self.enabled() {
+            return;
+        }
+
+        if self.clock % self.clock_rate() == 0 {
+            let (new_tima, overflowed) = self.tima.overflowing_add(1);
+            if overflowed {
+                interrupts.request_timer();
+                self.tima = self.tma;
+            } else {
+                self.tima = new_tima;
             }
         }
     }
@@ -43,17 +44,20 @@ impl Timer {
             regs::TIMA => self.tima,
             regs::TMA => self.tma,
             regs::TAC => self.tac,
-            _ => todo!("timer registers"),
+            _ => unreachable!(),
         }
     }
 
     pub fn store(&mut self, address: u16, val: u8) {
         match address {
-            regs::DIV => self.clock = 0,
+            regs::DIV => {
+                crate::debug_log!("DIV written to!");
+                self.clock = 0;
+            }
             regs::TIMA => self.tima = val,
             regs::TMA => self.tma = val,
             regs::TAC => self.tac = val & 0x7,
-            _ => todo!("timer registers"),
+            _ => unreachable!(),
         }
     }
 
@@ -62,7 +66,7 @@ impl Timer {
     }
 
     fn clock_rate(&self) -> u16 {
-        match self.tac & 0x3 {
+        match self.tac & 0b11 {
             0b00 => 1024, // clocks   4096 Hz
             0b01 => 16,   // clocks 262144 Hz
             0b10 => 64,   // clocks  65536 Hz

@@ -1,36 +1,30 @@
-// Specs:
-// CPU: 8-bit
-// Main RAM: 8K bytes
-// Video RAM: 8K bytes
-// Resolution: 160x144 (20x18 tiles)
-// Max # of sprites: 40
-// Max # sprites/line: 10
-// Max sprite size: 8x16
-// Min sprite size: 8x8
-// Clock speed: 4.194304 MHz
-// H-Sync: 9198 KHz
-// V-Sync: 59.73 Hz
-//
-// 1 machine cycle = 4 clock cycles
-//         | CPU Speed | NOP Inst
-// M-Cycle | 1.05MHz   | 1 cycle
-// T-Cycle | 4.19MHz   | 4 cycles
-
+/// Specs:
+/// CPU: 8-bit
+/// Main RAM: 8K bytes
+/// Video RAM: 8K bytes
+/// Resolution: 160x144 (20x18 tiles)
+/// Max # of sprites: 40
+/// Max # sprites/line: 10
+/// Max sprite size: 8x16
+/// Min sprite size: 8x8
+/// Clock speed: 4.194304 MHz
+/// H-Sync: 9198 KHz
+/// V-Sync: 59.73 Hz
+///
+/// 1 machine cycle = 4 clock cycles
+///         | CPU Speed | NOP Inst
+/// M-Cycle | 1.05MHz   | 1 cycle
+/// T-Cycle | 4.19MHz   | 4 cycles
 use parking_lot::Mutex;
 use std::{error::Error, ops::ControlFlow};
 
-const M_CLOCK_FREQUENCY: u64 = 4_194_304;
-const T_CLOCK_FREQUENCY: u64 = M_CLOCK_FREQUENCY / 4;
-const TICK_DURATION: std::time::Duration =
-    std::time::Duration::from_nanos(1_000_000_000 / T_CLOCK_FREQUENCY);
+const TICK_DURATION: std::time::Duration = std::time::Duration::from_nanos(
+    1_000_000_000 / crate::cpu::T_CLOCK_FREQUENCY,
+);
 
 const FRAMES_PER_SECOND: u64 = 60;
-const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
-const FRAME_DURATION: std::time::Duration =
-    std::time::Duration::from_nanos(NANOSECONDS_PER_SECOND / FRAMES_PER_SECOND);
-
 const TICKS_TO_ADVANCE_PER_RUN_STEP: u32 =
-    (T_CLOCK_FREQUENCY / FRAMES_PER_SECOND) as u32;
+    (crate::cpu::T_CLOCK_FREQUENCY / FRAMES_PER_SECOND) as u32;
 
 mod audio;
 pub mod cart;
@@ -101,51 +95,47 @@ fn main() -> Result<(), Box<dyn Error>> {
         Box::leak(Box::new(Mutex::new(RunCtx {
             cpu,
             debug: cli_args.debug,
-            run_state: if cli_args.debug {
-                RunState::Paused
-            } else {
-                RunState::Running
-            },
-            //mem_addr: None,
+            run_state: RunState::Running,
             exit_requested: false,
             speedup_factor: 1.0,
+            volumes: [100.0, 100.0, 100.0, 100.0, 100.0],
         })))
     };
     std::thread::scope(|s| {
         let ctx = &*ctx;
-        let gui_thread = s.spawn(move || {
+        let gui_thread = s.spawn(|| {
             gui::main_loop(
-                move |event| -> ControlFlow<()> {
+                |event| -> ControlFlow<()> {
                     let mut ctx = ctx.lock();
                     handle_event_(&event, &mut ctx)
                 },
-                move |ui: &imgui::Ui, frame: imgui::TextureId| {
+                |ui: &imgui::Ui, frame: imgui::TextureId| {
                     let mut ctx = ctx.lock();
                     draw_ui_(ui, frame, &mut ctx);
                 },
-                move |frame: &mut gui::ScreenBuffer| {
+                |frame: &mut gui::ScreenBuffer| {
                     let ctx = ctx.lock();
                     ctx.cpu.mmu.io.lcd.render(frame)
                 },
             );
         });
-        let audio_thread = s.spawn(move || {
+        let audio_thread = s.spawn(|| {
             audio::loop_(
-                move |rate: u32| {
+                |rate: u32, channels: u16| {
                     let mut ctx = ctx.lock();
-                    audio_init(&mut ctx, rate);
+                    audio_init(&mut ctx, rate, channels);
                 },
-                move || {
+                || {
                     let ctx = ctx.lock();
                     audio_tick(&ctx)
                 },
-                move |data: &mut [f32]| {
+                |data: &mut [f32]| {
                     let mut ctx = ctx.lock();
                     audio_callback(&mut ctx, data);
                 },
             )
         });
-        let compute_thread = s.spawn(move || compute_thread_(ctx));
+        let compute_thread = s.spawn(|| compute_thread_(ctx));
         gui_thread.join().unwrap();
         ctx.lock().exit_requested = true;
         compute_thread.join().unwrap();
@@ -154,8 +144,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn audio_init(ctx: &mut RunCtx, rate: u32) {
-    ctx.cpu.mmu.io.apu.set_sample_rate(rate as usize)
+fn audio_init(ctx: &mut RunCtx, rate: u32, channels: u16) {
+    ctx.cpu.mmu.io.apu.init(rate as usize, channels as usize);
 }
 
 fn audio_tick(ctx: &RunCtx) -> audio::Action {
@@ -169,7 +159,7 @@ fn audio_tick(ctx: &RunCtx) -> audio::Action {
 }
 
 fn audio_callback(ctx: &mut RunCtx, data: &mut [f32]) {
-    ctx.cpu.mmu.io.apu.render(data);
+    ctx.cpu.mmu.io.apu.render(data, &ctx.volumes);
 }
 
 fn read_rom(path: &str) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -191,9 +181,9 @@ struct RunCtx {
     cpu: CPU,
     debug: bool,
     run_state: RunState,
-    //mem_addr: Option<u16>,
     speedup_factor: f32,
     exit_requested: bool,
+    volumes: [f32; 5],
 }
 
 fn draw_ui_(ui: &imgui::Ui, frame: imgui::TextureId, ctx: &mut RunCtx) {
@@ -254,6 +244,20 @@ fn draw_ui_(ui: &imgui::Ui, frame: imgui::TextureId, ctx: &mut RunCtx) {
                 ui.text_wrapped(dump!(ctx.cpu.mmu.io.joypad));
             })
             .unwrap();
+        const VOLUME_POS: [f32; 2] =
+            [JOYPAD_POS[X], JOYPAD_POS[Y] + JOYPAD_SIZE[Y]];
+        const VOLUME_SIZE: [f32; 2] = [JOYPAD_SIZE[X], 200.0];
+        ui.window("volume")
+            .size(VOLUME_SIZE, imgui::Condition::FirstUseEver)
+            .position(VOLUME_POS, imgui::Condition::FirstUseEver)
+            .build(|| {
+                ui.slider("master", 0.0, 100.0, &mut ctx.volumes[0]);
+                ui.slider("channel 1", 0.0, 100.0, &mut ctx.volumes[1]);
+                ui.slider("channel 2", 0.0, 100.0, &mut ctx.volumes[2]);
+                ui.slider("channel 3", 0.0, 100.0, &mut ctx.volumes[3]);
+                ui.slider("channel 4", 0.0, 100.0, &mut ctx.volumes[4]);
+            })
+            .unwrap();
         const REGS_POS: [f32; 2] =
             [DISPLAY_POS[X] + DISPLAY_SIZE[X], DISPLAY_POS[Y]];
         const REGS_SIZE: [f32; 2] = [220.0, 300.0];
@@ -285,13 +289,6 @@ fn draw_ui_(ui: &imgui::Ui, frame: imgui::TextureId, ctx: &mut RunCtx) {
                 }
                 scratch.clear();
                 ui.input_float("speedup", &mut ctx.speedup_factor).build();
-                //let mem_changed = ui
-                //    .input_text("mem", &mut addr_str)
-                //    .enter_returns_true(true)
-                //    .build();
-                //if mem_changed {
-                //    ctx.mem_addr = parse_addr(&addr_str);
-                //}
                 let breaks = ctx.cpu.breakpoints.dump();
                 if !breaks.is_empty() {
                     ui.text(breaks);
@@ -312,18 +309,6 @@ fn draw_ui_(ui: &imgui::Ui, frame: imgui::TextureId, ctx: &mut RunCtx) {
                 }
             })
             .unwrap();
-        //const MEM_POS: [f32; 2] = [REGS_POS[X] + REGS_SIZE[X], REGS_POS[Y]];
-        //const MEM_SIZE: [f32; 2] = [600.0, 400.0];
-        //ui.window("mem")
-        //    .size(MEM_SIZE, imgui::Condition::FirstUseEver)
-        //    .position(MEM_POS, imgui::Condition::FirstUseEver)
-        //    .movable(false)
-        //    .build(|| {
-        //        let start = ctx.mem_addr.unwrap_or(0) as usize;
-        //        let block = ctx.cpu.mmu.block_load(start as u16, 0x200);
-        //        ui.text(utils::disp_chunks(block, start, 0x10));
-        //    })
-        //    .unwrap();
         const CART_POS: [f32; 2] =
             [CONTROLS_POS[X] + CONTROLS_SIZE[X], CONTROLS_POS[Y]];
         const CART_SIZE: [f32; 2] = [200.0, 200.0];
@@ -384,7 +369,7 @@ fn draw_ui_(ui: &imgui::Ui, frame: imgui::TextureId, ctx: &mut RunCtx) {
         const APU_POS: [f32; 2] =
             [DISASM_POS[X] + DISASM_SIZE[X], DISASM_POS[Y]];
         const APU_SIZE: [f32; 2] = [300.0, 300.0];
-        ui.window("APU")
+        ui.window("apu")
             .size(APU_SIZE, imgui::Condition::FirstUseEver)
             .position(APU_POS, imgui::Condition::FirstUseEver)
             .movable(false)
@@ -449,11 +434,13 @@ fn compute_thread_(ctx: &Mutex<RunCtx>) {
     loop {
         let mut ctx = ctx.lock();
         if ctx.exit_requested {
+            ctx.cpu.mmu.dump_cart_sram();
             break;
         }
         let ticks_to_advance = match ctx.run_state {
             RunState::Paused => {
                 // When paused, sleep a little bit so we don't busy wait
+                drop(ctx);
                 std::thread::sleep(std::time::Duration::from_micros(500));
                 continue;
             }
@@ -470,15 +457,12 @@ fn compute_thread_(ctx: &Mutex<RunCtx>) {
             let Tick {
                 pc,
                 breakpoint_was_hit,
-                op_was_retired,
             } = ctx.cpu.tick();
-            if ctx.debug {
-                if breakpoint_was_hit {
-                    ctx.run_state = RunState::Paused;
-                    crate::debug_log!("Hit breakpoint '{0:04X?}'", pc);
-                    ctx.cpu.breakpoints.reset_count(pc);
-                    break;
-                }
+            if ctx.debug && breakpoint_was_hit {
+                ctx.run_state = RunState::Paused;
+                crate::debug_log!("Hit breakpoint '{0:04X?}'", pc);
+                ctx.cpu.breakpoints.reset_count(pc);
+                break;
             }
         }
         match ctx.run_state {
@@ -548,7 +532,6 @@ fn handle_event_(event: &gui::Event, ctx: &mut RunCtx) -> ControlFlow<()> {
             ControlFlow::Continue(())
         }
         gui::Event::KeyDown(K::S) => {
-            //ctx.run_state = RunState::Stepping(100);
             save_state_with_name(&ctx.cpu.mmu.cart().name(), &ctx.cpu);
             ControlFlow::Continue(())
         }

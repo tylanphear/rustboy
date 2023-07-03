@@ -38,8 +38,8 @@ pub struct MMU {
     iflags: u8,
     ie: u8,
 
-    pub(crate) cartridge: Option<Cartridge>,
     bios_enabled: bool,
+    pub(crate) cartridge: Option<Cartridge>,
 
     oam_base_addr: u16,
     oam_clocks_left: u16,
@@ -73,7 +73,8 @@ impl MMU {
     }
 
     pub fn load_cart(&mut self, data: Vec<u8>) {
-        let cart = Cartridge::new(data);
+        let mut cart = Cartridge::new(data);
+        cart.load_sram();
         self.cartridge = Some(cart);
     }
 
@@ -109,7 +110,7 @@ impl MMU {
 
     pub fn load8_unchecked(&self, address: u16) -> u8 {
         match address {
-            cpu::regs::IF => self.iflags,
+            cpu::reg::IF => self.iflags,
             regs::BIOS_ROM_DISABLE => 0xE | !self.bios_enabled as u8,
             ppu::reg::DMA => self.oam_base_addr.to_le_bytes()[0],
             // | BIOS   | Bootstrap program (when enabled)
@@ -139,7 +140,7 @@ impl MMU {
             // | HRAM   | Internal CPU RAM
             0xFF80..=0xFFFE => self.hram[address - 0xFF80],
             // | IE     | Interrupt Enable register
-            cpu::regs::IE => self.ie,
+            cpu::reg::IE => self.ie,
         }
     }
 
@@ -217,7 +218,7 @@ impl MMU {
             0xFE00..=0xFE9F => self.io.lcd.store(address, val),
             // | UNUSED | Ignored/empty (mostly)
             0xFEA0..=0xFEFF => (),
-            cpu::regs::IF => self.iflags = val | 0b11100000,
+            cpu::reg::IF => self.iflags = val | 0b11100000,
             regs::BIOS_ROM_DISABLE => if val & 0x1 != 0 {
                 self.bios_enabled = false;
             }
@@ -282,5 +283,9 @@ impl MMU {
             // | IE     | Interrupt Enable register
             0xFFFF => &[],
         }
+    }
+
+    pub(crate) fn dump_cart_sram(&self) {
+        self.cart().dump_sram();
     }
 }
