@@ -6,11 +6,11 @@ most games. Currently runs most games with full sound/graphics with minimal lag
 (on my machine ;)
 
 Progress so far (estimated):
-    - Emulation:
-        - CPU: 95/100
-        - PPU: 90/100
-        - APU: 80/100
-        - MMU: 80/100
-            - Mappers: 50/100
-    - UI: ??/100
-    - Debug: ??
+* Emulation:
+    * CPU: 95/100
+    * PPU: 90/100
+    * APU: 80/100
+    * MMU: 80/100
+        * Mappers: 50/100
+* UI: ??/100
+* Debug: ??
