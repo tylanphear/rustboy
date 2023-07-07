@@ -23,8 +23,8 @@ const TICK_DURATION: std::time::Duration = std::time::Duration::from_nanos(
 );
 
 const FRAMES_PER_SECOND: u64 = 60;
-const TICKS_TO_ADVANCE_PER_RUN_STEP: u32 =
-    (crate::cpu::T_CLOCK_FREQUENCY / FRAMES_PER_SECOND) as u32;
+const TICKS_TO_ADVANCE_PER_RUN_STEP: usize =
+    (crate::cpu::T_CLOCK_FREQUENCY / FRAMES_PER_SECOND) as usize;
 
 mod audio;
 pub mod cart;
@@ -98,38 +98,26 @@ fn main() -> Result<(), Box<dyn Error>> {
             run_state: RunState::Running,
             exit_requested: false,
             speedup_factor: 1.0,
+            last_op_address: None,
             volumes: [100.0, 100.0, 100.0, 100.0, 100.0],
         })))
     };
     std::thread::scope(|s| {
         let ctx = &*ctx;
-        let gui_thread = s.spawn(|| {
-            gui::main_loop(
-                |event| -> ControlFlow<()> {
-                    let mut ctx = ctx.lock();
-                    handle_event_(&event, &mut ctx)
-                },
-                |ui: &imgui::Ui, frame: imgui::TextureId| {
-                    let mut ctx = ctx.lock();
-                    draw_ui_(ui, frame, &mut ctx);
-                },
-                |frame: &mut gui::ScreenBuffer| {
-                    let ctx = ctx.lock();
-                    ctx.cpu.mmu.io.lcd.render(frame)
-                },
-            );
+        let gui_thread = s.spawn(move || {
+            gui::main_loop(GuiClient { ctx });
         });
-        let audio_thread = s.spawn(|| {
-            audio::loop_(
-                |rate: u32, channels: u16| {
+        let audio_thread = s.spawn(move || {
+            audio::main_loop(
+                move |rate: u32, channels: u16| {
                     let mut ctx = ctx.lock();
                     audio_init(&mut ctx, rate, channels);
                 },
-                || {
+                move || {
                     let ctx = ctx.lock();
                     audio_tick(&ctx)
                 },
-                |data: &mut [f32]| {
+                move |data: &mut [f32]| {
                     let mut ctx = ctx.lock();
                     audio_callback(&mut ctx, data);
                 },
@@ -153,8 +141,8 @@ fn audio_tick(ctx: &RunCtx) -> audio::Action {
         return audio::Action::Exit;
     }
     match ctx.run_state {
-        RunState::Paused | RunState::Stepping(..) => audio::Action::Pause,
         RunState::Running => audio::Action::Play,
+        _ => audio::Action::Pause,
     }
 }
 
@@ -173,7 +161,8 @@ fn read_rom(path: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RunState {
     Paused,
-    Stepping(u32),
+    StepTicks(u32),
+    StepOps(u32),
     Running,
 }
 
@@ -183,6 +172,7 @@ struct RunCtx {
     run_state: RunState,
     speedup_factor: f32,
     exit_requested: bool,
+    last_op_address: Option<u16>,
     volumes: [f32; 5],
 }
 
@@ -425,55 +415,67 @@ fn parse_addr(break_addr_str: &str) -> Option<u16> {
 
 const BIOS: &[u8; 0x100] = include_bytes!("../gb_bios.bin");
 
-fn reset_cpu(ctx: &mut RunCtx) {
-    ctx.cpu.reset();
-    ctx.cpu.mmu.load_bios(BIOS);
+fn reset_cpu(cpu: &mut CPU) {
+    cpu.reset();
+    cpu.mmu.load_bios(BIOS);
 }
 
 fn compute_thread_(ctx: &Mutex<RunCtx>) {
+    let mut last_tick_time;
     loop {
         let mut ctx = ctx.lock();
         if ctx.exit_requested {
             ctx.cpu.mmu.dump_cart_sram();
             break;
         }
-        let ticks_to_advance = match ctx.run_state {
+        let (ticks_to_advance, ops_to_advance) = match ctx.run_state {
             RunState::Paused => {
                 // When paused, sleep a little bit so we don't busy wait
                 drop(ctx);
                 std::thread::sleep(std::time::Duration::from_micros(500));
                 continue;
             }
-            RunState::Stepping(n) => n,
-            RunState::Running => TICKS_TO_ADVANCE_PER_RUN_STEP,
+            RunState::StepTicks(ticks) => (ticks as usize, usize::MAX),
+            RunState::StepOps(ops) => (usize::MAX, ops as usize),
+            RunState::Running => (TICKS_TO_ADVANCE_PER_RUN_STEP, usize::MAX),
         };
-        let before_ticks = std::time::Instant::now();
-        for _ in 0..ticks_to_advance {
+        last_tick_time = std::time::Instant::now();
+        let mut ticks = 0;
+        let mut ops = 0;
+        loop {
+            if ticks >= ticks_to_advance || ops >= ops_to_advance {
+                break;
+            }
+            ticks += 1;
             if ctx.debug && debug::break_::check_and_reset() {
                 crate::debug_log!("Hit breakpoint '{0:04X?}'", ctx.cpu.regs.pc);
                 ctx.run_state = RunState::Paused;
                 break;
             }
-            let Tick {
-                pc,
-                breakpoint_was_hit,
-            } = ctx.cpu.tick();
-            if ctx.debug && breakpoint_was_hit {
+            let this_cycle: Tick = ctx.cpu.tick();
+            if ctx.debug && this_cycle.breakpoint_was_hit {
                 ctx.run_state = RunState::Paused;
-                crate::debug_log!("Hit breakpoint '{0:04X?}'", pc);
-                ctx.cpu.breakpoints.reset_count(pc);
+                crate::debug_log!("Hit breakpoint '{0:04X?}'", this_cycle.pc);
+                ctx.cpu.breakpoints.reset_count(this_cycle.pc);
                 break;
+            }
+            if this_cycle.op_was_retired {
+                ops += 1;
+                ctx.last_op_address = Some(this_cycle.pc);
             }
         }
         match ctx.run_state {
-            RunState::Stepping(..) => ctx.run_state = RunState::Paused,
+            RunState::StepTicks(..) | RunState::StepOps(..) => {
+                ctx.run_state = RunState::Paused
+            }
             RunState::Running => {
                 let speedup_factor = ctx.speedup_factor;
                 // Explicitly drop the mutex before sleeping, so we hold the
                 // lock for as little time as possible.
                 drop(ctx);
-                let expected_tick_time = TICK_DURATION * ticks_to_advance;
-                let actual_tick_time = before_ticks.elapsed();
+                let expected_tick_time =
+                    TICK_DURATION * (TICKS_TO_ADVANCE_PER_RUN_STEP as u32);
+                let actual_tick_time = last_tick_time.elapsed();
                 if expected_tick_time < actual_tick_time {
                     crate::debug_log!(
                         "executing ticks took {}µs longer \
@@ -495,70 +497,342 @@ fn compute_thread_(ctx: &Mutex<RunCtx>) {
     }
 }
 
-fn handle_event_(event: &gui::Event, ctx: &mut RunCtx) -> ControlFlow<()> {
-    use sdl2::keyboard::Keycode as K;
+struct GuiClient<'a> {
+    ctx: &'a Mutex<RunCtx>,
+}
 
-    fn sdl_key_to_joypad_code(key: &sdl2::keyboard::Keycode) -> Option<u8> {
-        Some(match key {
-            K::Num1 => io::joypad::START,
-            K::Num2 => io::joypad::SELECT,
-            K::Z => io::joypad::B,
-            K::X => io::joypad::A,
-            K::Left => io::joypad::LEFT,
-            K::Right => io::joypad::RIGHT,
-            K::Up => io::joypad::UP,
-            K::Down => io::joypad::DOWN,
-            _ => return None,
-        })
+impl<'a> gui::Client for GuiClient<'a> {
+    fn handle_event(&mut self, event: gui::Event) -> ControlFlow<()> {
+        let mut ctx = self.ctx.lock();
+        use crate::io::joypad::keys as joypad;
+        use sdl2::keyboard::Keycode as K;
+
+        fn sdl_key_to_joypad_code(key: &K) -> Option<u8> {
+            Some(match key {
+                K::Num1 => joypad::START,
+                K::Num2 => joypad::SELECT,
+                K::Z => joypad::B,
+                K::X => joypad::A,
+                K::Left => joypad::LEFT,
+                K::Right => joypad::RIGHT,
+                K::Up => joypad::UP,
+                K::Down => joypad::DOWN,
+                _ => return None,
+            })
+        }
+
+        match event {
+            gui::Event::Exit | gui::Event::KeyDown(K::Q) => {
+                return ControlFlow::Break(());
+            }
+            gui::Event::KeyDown(K::Tab) => {
+                ctx.debug = !ctx.debug;
+            }
+            gui::Event::KeyDown(K::R) => {
+                reset_cpu(&mut ctx.cpu);
+                debug::log::reset();
+            }
+            gui::Event::KeyDown(K::T) => {
+                ctx.run_state = RunState::StepTicks(1);
+            }
+            gui::Event::KeyDown(K::N) => {
+                ctx.run_state = RunState::StepOps(1);
+            }
+            gui::Event::KeyDown(K::S) => {
+                save_state_with_name(&ctx.cpu.mmu.cart().name(), &ctx.cpu);
+            }
+            gui::Event::KeyDown(K::L) => {
+                load_state_with_name(&ctx.cpu.mmu.cart().name(), &mut ctx.cpu);
+            }
+            gui::Event::KeyDown(K::Space) => {
+                if ctx.run_state == RunState::Running {
+                    ctx.run_state = RunState::Paused;
+                } else {
+                    ctx.run_state = RunState::Running;
+                }
+            }
+            gui::Event::KeyUp(K::Num3) => {
+                ctx.cpu.mmu.io.joypad.up(joypad::A);
+                ctx.cpu.mmu.io.joypad.up(joypad::B);
+                ctx.cpu.mmu.io.joypad.up(joypad::START);
+                ctx.cpu.mmu.io.joypad.up(joypad::SELECT);
+            }
+            gui::Event::KeyDown(K::Num3) => {
+                ctx.cpu.mmu.io.joypad.down(joypad::A);
+                ctx.cpu.mmu.io.joypad.down(joypad::B);
+                ctx.cpu.mmu.io.joypad.down(joypad::START);
+                ctx.cpu.mmu.io.joypad.down(joypad::SELECT);
+            }
+            gui::Event::KeyUp(key) => {
+                if let Some(code) = sdl_key_to_joypad_code(&key) {
+                    ctx.cpu.mmu.io.joypad.up(code);
+                }
+            }
+            gui::Event::KeyDown(key) => {
+                if let Some(code) = sdl_key_to_joypad_code(&key) {
+                    ctx.cpu.mmu.io.joypad.down(code);
+                }
+            }
+            gui::Event::Unknown(..) => {}
+        };
+        ControlFlow::Continue(())
     }
 
-    match event {
-        gui::Event::Exit | gui::Event::KeyDown(K::Q) => ControlFlow::Break(()),
-        gui::Event::KeyDown(K::Tab) => {
-            ctx.debug = !ctx.debug;
-            ControlFlow::Continue(())
+    fn draw_ui(&mut self, ui: &imgui::Ui, screen_texture_id: imgui::TextureId) {
+        let mut ctx = self.ctx.lock();
+
+        if ctx.debug {
+            Self::draw_debug_ui(ui, screen_texture_id, &mut ctx);
+        } else {
+            const SCALE: f32 = 4.0;
+            ui.window("display")
+                .size(
+                    [SCALE * 160.0 + 50.0, SCALE * 144.0 + 50.0],
+                    imgui::Condition::Always,
+                )
+                .position([010.0, 000.0], imgui::Condition::Always)
+                .movable(false)
+                .build(|| {
+                    const X_OFFSET: f32 = 25.0;
+                    const Y_OFFSET: f32 = 25.0;
+                    let [win_x, win_y] = ui.window_pos();
+                    ui.get_window_draw_list()
+                        .add_image(
+                            screen_texture_id,
+                            [win_x + X_OFFSET, win_y + Y_OFFSET],
+                            [
+                                win_x + SCALE * 160.0 + X_OFFSET,
+                                win_y + SCALE * 144.0 + Y_OFFSET,
+                            ],
+                        )
+                        .build();
+                });
         }
-        gui::Event::KeyDown(K::R) => {
-            reset_cpu(ctx);
-            debug::log::reset();
-            ControlFlow::Continue(())
+    }
+
+    fn render_frame(
+        &mut self,
+        screen: &mut gui::ScreenBuffer,
+    ) -> crate::io::ppu::RenderUpdate {
+        let ctx = self.ctx.lock();
+        ctx.cpu.mmu.io.lcd.render(screen)
+    }
+}
+
+impl GuiClient<'_> {
+    fn draw_debug_ui(
+        ui: &imgui::Ui,
+        screen_texture_id: imgui::TextureId,
+        ctx: &mut RunCtx,
+    ) {
+        use crate::utils::Dump;
+        let mut dump_str = String::with_capacity(0x1000);
+        macro_rules! dump {
+            ($e:expr) => {{
+                dump_str.clear();
+                ($e).dump(&mut dump_str).unwrap();
+                &dump_str
+            }};
         }
-        gui::Event::KeyDown(K::N) => {
-            ctx.run_state = RunState::Stepping(1);
-            ControlFlow::Continue(())
+
+        const X: usize = 0;
+        const Y: usize = 1;
+        const DISPLAY_SCALE: f32 = 2.5;
+        const DISPLAY_POS: [f32; 2] = [020.0, 000.0];
+        const DISPLAY_SIZE: [f32; 2] =
+            [DISPLAY_SCALE * 160.0, DISPLAY_SCALE * 144.0];
+        fn sum(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
+            [a[0] + b[0], a[1] + b[1]]
         }
-        gui::Event::KeyDown(K::M) => {
-            ctx.run_state = RunState::Stepping(4);
-            ControlFlow::Continue(())
-        }
-        gui::Event::KeyDown(K::S) => {
-            save_state_with_name(&ctx.cpu.mmu.cart().name(), &ctx.cpu);
-            ControlFlow::Continue(())
-        }
-        gui::Event::KeyDown(K::L) => {
-            load_state_with_name(&ctx.cpu.mmu.cart().name(), &mut ctx.cpu);
-            ControlFlow::Continue(())
-        }
-        gui::Event::KeyDown(K::Space) => {
-            if ctx.run_state == RunState::Running {
-                ctx.run_state = RunState::Paused;
-            } else {
-                ctx.run_state = RunState::Running;
-            }
-            ControlFlow::Continue(())
-        }
-        gui::Event::KeyUp(key) => {
-            if let Some(code) = sdl_key_to_joypad_code(key) {
-                ctx.cpu.mmu.io.joypad.up(code);
-            }
-            ControlFlow::Continue(())
-        }
-        gui::Event::KeyDown(key) => {
-            if let Some(code) = sdl_key_to_joypad_code(key) {
-                ctx.cpu.mmu.io.joypad.down(code);
-            }
-            ControlFlow::Continue(())
-        }
-        gui::Event::Unknown(..) => ControlFlow::Continue(()),
+        ui.window("display")
+            .size(DISPLAY_SIZE, imgui::Condition::Always)
+            .position(DISPLAY_POS, imgui::Condition::Always)
+            .movable(false)
+            .build(|| {
+                ui.get_window_draw_list()
+                    .add_image(
+                        screen_texture_id,
+                        sum(ui.window_pos(), ui.window_content_region_min()),
+                        sum(ui.window_pos(), ui.window_content_region_max()),
+                    )
+                    .build();
+            });
+        const LCD_POS: [f32; 2] =
+            [DISPLAY_POS[X], DISPLAY_POS[Y] + DISPLAY_SIZE[Y]];
+        const LCD_SIZE: [f32; 2] = [DISPLAY_SIZE[X] / 2.0, 200.0];
+        ui.window("lcd")
+            .size(LCD_SIZE, imgui::Condition::FirstUseEver)
+            .position(LCD_POS, imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                ui.text(format!(
+                    "TICK RATE: {}",
+                    TICKS_TO_ADVANCE_PER_RUN_STEP
+                ));
+                ui.text_wrapped(dump!(ctx.cpu.mmu.io.lcd));
+            })
+            .unwrap();
+        const JOYPAD_POS: [f32; 2] = [LCD_POS[X] + LCD_SIZE[X], LCD_POS[Y]];
+        const JOYPAD_SIZE: [f32; 2] = [DISPLAY_SIZE[X] / 2.0, 100.0];
+        ui.window("joypad")
+            .size(JOYPAD_SIZE, imgui::Condition::FirstUseEver)
+            .position(JOYPAD_POS, imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                ui.text_wrapped(dump!(ctx.cpu.mmu.io.joypad));
+            })
+            .unwrap();
+        const VOLUME_POS: [f32; 2] =
+            [JOYPAD_POS[X], JOYPAD_POS[Y] + JOYPAD_SIZE[Y]];
+        const VOLUME_SIZE: [f32; 2] = [JOYPAD_SIZE[X], 200.0];
+        ui.window("volume")
+            .size(VOLUME_SIZE, imgui::Condition::FirstUseEver)
+            .position(VOLUME_POS, imgui::Condition::FirstUseEver)
+            .build(|| {
+                ui.slider("master", 0.0, 100.0, &mut ctx.volumes[0]);
+                ui.slider("channel 1", 0.0, 100.0, &mut ctx.volumes[1]);
+                ui.slider("channel 2", 0.0, 100.0, &mut ctx.volumes[2]);
+                ui.slider("channel 3", 0.0, 100.0, &mut ctx.volumes[3]);
+                ui.slider("channel 4", 0.0, 100.0, &mut ctx.volumes[4]);
+            })
+            .unwrap();
+        const REGS_POS: [f32; 2] =
+            [DISPLAY_POS[X] + DISPLAY_SIZE[X], DISPLAY_POS[Y]];
+        const REGS_SIZE: [f32; 2] = [220.0, 300.0];
+        ui.window("regs")
+            .size(REGS_SIZE, imgui::Condition::FirstUseEver)
+            .position(REGS_POS, imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                ui.text_wrapped(dump!(ctx.cpu));
+            })
+            .unwrap();
+        const CONTROLS_POS: [f32; 2] =
+            [REGS_POS[X], REGS_POS[Y] + REGS_SIZE[Y]];
+        const CONTROLS_SIZE: [f32; 2] = [REGS_SIZE[X], 300.0];
+        ui.window("controls")
+            .size(CONTROLS_SIZE, imgui::Condition::FirstUseEver)
+            .position(CONTROLS_POS, imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                let mut scratch = String::new();
+                let bp_changed = ui
+                    .input_text("breakpoint", &mut scratch)
+                    .enter_returns_true(true)
+                    .build();
+                if bp_changed {
+                    if let Some(addr) = parse_addr(&scratch) {
+                        ctx.cpu.breakpoints.register(addr);
+                    }
+                }
+                scratch.clear();
+                ui.input_float("speedup", &mut ctx.speedup_factor).build();
+                let breaks = ctx.cpu.breakpoints.dump();
+                if !breaks.is_empty() {
+                    ui.text(breaks);
+                }
+                let wp_changed = ui
+                    .input_text("watchpoint", &mut scratch)
+                    .enter_returns_true(true)
+                    .build();
+                if wp_changed {
+                    if let Some(addr) = parse_addr(&scratch) {
+                        ctx.cpu.mmu.register_watchpoint(addr);
+                    }
+                }
+                scratch.clear();
+                ctx.cpu.mmu.dump_watchpoints(&mut scratch).unwrap();
+                if !scratch.is_empty() {
+                    ui.text_wrapped(scratch);
+                }
+            })
+            .unwrap();
+        const CART_POS: [f32; 2] =
+            [CONTROLS_POS[X] + CONTROLS_SIZE[X], CONTROLS_POS[Y]];
+        const CART_SIZE: [f32; 2] = [200.0, 200.0];
+        ui.window("cartridge")
+            .size(CART_SIZE, imgui::Condition::FirstUseEver)
+            .position(CART_POS, imgui::Condition::FirstUseEver)
+            .build(|| {
+                if let Some(ref cart) = ctx.cpu.mmu.cartridge {
+                    ui.text_wrapped(dump!(cart));
+                }
+            })
+            .unwrap();
+        const TIMER_POS: [f32; 2] = [LCD_POS[X], LCD_POS[Y] + LCD_SIZE[Y]];
+        const TIMER_SIZE: [f32; 2] = [LCD_SIZE[X], 150.0];
+        ui.window("timer")
+            .size(TIMER_SIZE, imgui::Condition::FirstUseEver)
+            .position(TIMER_POS, imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                ui.text_wrapped(dump!(ctx.cpu.mmu.io.timer));
+            })
+            .unwrap();
+        const DISASM_POS: [f32; 2] = [REGS_POS[X] + REGS_SIZE[X], REGS_POS[Y]];
+        const DISASM_SIZE: [f32; 2] = [200.0, 300.0];
+        ui.window("disassembly")
+            .size(DISASM_SIZE, imgui::Condition::FirstUseEver)
+            .position(DISASM_POS, imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                let current_pc = ctx.cpu.regs.pc;
+                let last_pc = if let Some(last_op_address) = ctx.last_op_address
+                {
+                    if current_pc > last_op_address
+                        && current_pc - last_op_address <= 3
+                    {
+                        last_op_address
+                    } else {
+                        current_pc
+                    }
+                } else {
+                    current_pc
+                };
+                let bytes = ctx.cpu.mmu.block_load(last_pc, usize::MAX);
+                let insts: Vec<_> = disassembler::InstIter::new(bytes)
+                    .map_while(|it| {
+                        (it.offset <= current_pc as usize
+                            || !opcodes::is_unconditional_jump(it.code()))
+                        .then(|| {
+                            let address = last_pc + (it.offset as u16);
+                            format!(
+                                "{}{:04X}: {}",
+                                if last_pc + (it.offset as u16) == current_pc {
+                                    "-->"
+                                } else {
+                                    "   "
+                                },
+                                address,
+                                it.to_string()
+                            )
+                        })
+                    })
+                    .collect();
+                ui.text_wrapped(insts.join("\n"));
+            })
+            .unwrap();
+        const APU_POS: [f32; 2] =
+            [DISASM_POS[X] + DISASM_SIZE[X], DISASM_POS[Y]];
+        const APU_SIZE: [f32; 2] = [300.0, 300.0];
+        ui.window("apu")
+            .size(APU_SIZE, imgui::Condition::FirstUseEver)
+            .position(APU_POS, imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                ui.text_wrapped(dump!(ctx.cpu.mmu.io.apu));
+            })
+            .unwrap();
+        const LOG_POS: [f32; 2] = [CART_POS[X] + CART_SIZE[X], CART_POS[Y]];
+        const LOG_SIZE: [f32; 2] = [400.0, 400.0];
+        ui.window("log")
+            .size(LOG_SIZE, imgui::Condition::FirstUseEver)
+            .position(LOG_POS, imgui::Condition::FirstUseEver)
+            .movable(false)
+            .build(|| {
+                ui.text_wrapped(debug_log_as_str!());
+                ui.set_scroll_here_y_with_ratio(1.0);
+            })
+            .unwrap();
     }
 }

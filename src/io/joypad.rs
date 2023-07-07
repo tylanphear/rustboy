@@ -16,7 +16,7 @@ impl Default for Joypad {
 }
 
 #[rustfmt::skip]
-mod keys {
+pub mod keys {
     pub const DOWN:   u8 = 0b1000_0000;
     pub const UP:     u8 = 0b0100_0000;
     pub const LEFT:   u8 = 0b0010_0000;

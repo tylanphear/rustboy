@@ -6,7 +6,7 @@ pub enum Action {
     Exit,
 }
 
-pub fn loop_<I, E, D>(init: I, mut each_tick: E, mut data_callback: D)
+pub fn main_loop<I, E, D>(init: I, mut tick: E, mut data_callback: D)
 where
     I: FnOnce(u32, u16),
     E: FnMut() -> Action,
@@ -48,7 +48,7 @@ where
         .unwrap();
     stream.play().unwrap();
     loop {
-        match each_tick() {
+        match tick() {
             Action::Play => stream.play().unwrap(),
             Action::Pause => stream.pause().unwrap(),
             Action::Exit => break,

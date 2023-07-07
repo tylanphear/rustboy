@@ -21,29 +21,6 @@ pub enum Event {
     Unknown(sdl2::event::Event),
 }
 
-impl From<sdl2::event::Event> for Event {
-    fn from(value: sdl2::event::Event) -> Self {
-        use sdl2::event::Event as E;
-        use sdl2::event::WindowEvent as WE;
-        match value {
-            E::Window {
-                win_event: WE::Close,
-                ..
-            }
-            | E::Quit { .. } => Self::Exit,
-            E::KeyDown {
-                keycode: Some(code),
-                ..
-            } => Self::KeyDown(code),
-            E::KeyUp {
-                keycode: Some(code),
-                ..
-            } => Self::KeyUp(code),
-            _ => Self::Unknown(value),
-        }
-    }
-}
-
 pub struct ScreenBuffer {
     gl_pixels: Box<[u8; 160 * 144 * 4]>,
 }
@@ -83,15 +60,16 @@ impl crate::ppu::ExternalScreenBuffer for ScreenBuffer {
     }
 }
 
-pub fn main_loop<H, E, R>(
-    mut handle_event: H,
-    mut draw_ui: E,
-    mut render_frame: R,
-) where
-    H: FnMut(Event) -> ControlFlow<()>,
-    E: FnMut(&imgui::Ui, imgui::TextureId),
-    R: FnMut(&mut ScreenBuffer) -> crate::io::ppu::RenderUpdate,
-{
+pub trait Client {
+    fn handle_event(&mut self, event: Event) -> ControlFlow<()>;
+    fn draw_ui(&mut self, ui: &imgui::Ui, screen_texture_id: imgui::TextureId);
+    fn render_frame(
+        &mut self,
+        screen: &mut ScreenBuffer,
+    ) -> crate::io::ppu::RenderUpdate;
+}
+
+pub fn main_loop<C: Client>(mut client: C) {
     let sdl = sdl2::init().expect("couldn't initialize SDL?");
     let video = sdl.video().expect("couldn't get SDL video subsystem?");
     video.gl_attr().set_context_version(3, 3);
@@ -151,10 +129,27 @@ pub fn main_loop<H, E, R>(
 
     let mut screen_buffer = ScreenBuffer::new();
     'main: loop {
-        for event in event_pump.poll_iter() {
-            platform.handle_event(&mut imgui, &event);
+        for sdl_event in event_pump.poll_iter() {
+            platform.handle_event(&mut imgui, &sdl_event);
 
-            match handle_event(Event::from(event)) {
+            use sdl2::event::Event as E;
+            use sdl2::event::WindowEvent as WE;
+            let event = match sdl_event {
+                E::Window {
+                    win_event: WE::Close,
+                    ..
+                }
+                | E::Quit { .. } => Event::Exit,
+                E::KeyUp {
+                    keycode: Some(key), ..
+                } => Event::KeyUp(key),
+                E::KeyDown {
+                    keycode: Some(key), ..
+                } => Event::KeyDown(key),
+                e => Event::Unknown(e),
+            };
+
+            match client.handle_event(event) {
                 ControlFlow::Break(()) => break 'main,
                 ControlFlow::Continue(()) => continue,
             }
@@ -163,9 +158,9 @@ pub fn main_loop<H, E, R>(
         platform.prepare_frame(&mut imgui, &window, &event_pump);
 
         let ui = imgui.new_frame();
-        draw_ui(ui, framebuffer_tex_id);
+        client.draw_ui(ui, framebuffer_tex_id);
 
-        let update = render_frame(&mut screen_buffer);
+        let update = client.render_frame(&mut screen_buffer);
         if update.num_scanlines() > 0 {
             unsafe {
                 use glow::*;

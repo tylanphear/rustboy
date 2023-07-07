@@ -66,6 +66,7 @@ impl Interrupts {
 pub struct Tick {
     pub breakpoint_was_hit: bool,
     pub pc: u16,
+    pub op_was_retired: bool,
 }
 const CYCLES_PER_TICK: u64 = 4;
 
@@ -215,6 +216,8 @@ impl CPU {
         // interrupt vector). Once that's done, fetch/decode the instruction at
         // the current PC.
         if let State::RetiringOp(0) = self.state {
+            this_tick.op_was_retired = true;
+
             self.enable_interrupts_if_scheduled();
             let interrupt_was_dispatched = self.handle_interrupts();
             if interrupt_was_dispatched {
@@ -325,13 +328,12 @@ impl CPU {
         self.regs.sp = self.regs.sp.wrapping_sub(2);
         self.mmu.store16(self.regs.sp, self.regs.pc);
 
-        // jump to interrupt vector
+        // Jump to interrupt vector
         self.regs.pc = interrupt_vector;
 
-        // TODO: It takes 20 clocks to dispatch an interrupt
-        self.state = State::InterruptDelay(20);
+        // It takes 20 clocks to dispatch an interrupt
         // (TODO: +4 clocks in halt mode(?))
-        // self.tick(20);
+        self.state = State::InterruptDelay(20);
         true
     }
 
