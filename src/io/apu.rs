@@ -129,6 +129,21 @@ struct EnvelopeUnit {
 }
 
 impl EnvelopeUnit {
+    fn trigger(
+        &mut self,
+        pace: u8,
+        volume: u8,
+        increase: bool,
+        channel_enabled: &mut bool,
+    ) {
+        self.pace = pace;
+        self.volume = volume;
+        self.increase = increase;
+        if self.volume == 0 && !self.increase {
+            *channel_enabled = false;
+        }
+    }
+
     fn tick(&mut self, clock: u64) {
         if clock % (MAIN_CLOCK_FREQUENCY / 64) == 0 {
             if self.pace == 0 {
@@ -146,11 +161,6 @@ impl EnvelopeUnit {
                 (false, v) => v - 1,
             };
         }
-    }
-
-    fn trigger(&mut self, pace: u8, volume: u8) {
-        self.pace = pace;
-        self.volume = volume;
     }
 }
 
@@ -245,6 +255,8 @@ impl<const SWEEP: bool> SquareCircuit<SWEEP> {
         self.envelope.trigger(
             regs.channel_envelope_pace(channel),
             regs.channel_envelope_volume(channel),
+            regs.channel_envelope_increase(channel),
+            &mut self.enabled,
         );
         if SWEEP {
             self.freq_unit.trigger(regs);
@@ -390,6 +402,8 @@ impl NoiseCircuit {
         self.envelope.trigger(
             regs.channel_envelope_pace(4),
             regs.channel_envelope_volume(4),
+            regs.channel_envelope_increase(4),
+            &mut self.enabled,
         );
     }
 
@@ -451,6 +465,15 @@ impl Registers {
             1 => self.read(reg::NR12) >> 4,
             2 => self.read(reg::NR22) >> 4,
             4 => self.read(reg::NR42) >> 4,
+            _ => unreachable!(),
+        }
+    }
+
+    fn channel_envelope_increase(&self, channel: usize) -> bool {
+        match channel {
+            1 => crate::utils::bit_set(self.read(reg::NR12), 3),
+            2 => crate::utils::bit_set(self.read(reg::NR22), 3),
+            4 => crate::utils::bit_set(self.read(reg::NR42), 3),
             _ => unreachable!(),
         }
     }
