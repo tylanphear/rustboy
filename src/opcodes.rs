@@ -426,7 +426,7 @@ const OPS: [Op; 0x100] = [
     /* 0x33 */ op!("INC SP", 1, 8, alu16, INC16, SP),
     /* 0x34 */ op!("INC (HL)", 1, 12, alu2, INC, MEM_HL),
     /* 0x35 */ op!("DEC (HL)", 1, 12, alu2, DEC, MEM_HL),
-    /* 0x36 */ op!("LD (HL),d8", 2, 12, load, MEM_HL, D8),
+    /* 0x36 */ op!("LD (HL), d8", 2, 12, load, MEM_HL, D8),
     /* 0x37 */ op!("SCF", 1, 4, alu2, SCF),
     /* 0x38 */ op!("JR C, r8", 2, 8, cfu, JR, CONDC),
     /* 0x39 */ op!("ADD HL, SP", 1, 8, alu16, ADDHL, SP),
