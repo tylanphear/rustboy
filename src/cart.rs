@@ -31,7 +31,7 @@ impl Cartridge {
 
     pub fn reset(&mut self) {
         match &mut self.mbc {
-            MBC::None { sram } => sram.clear(),
+            MBC::None { .. } => {},
             MBC::MBC1(mbc) => mbc.reset(),
             MBC::MBC3(mbc) => mbc.reset(),
             MBC::MBC5(mbc) => mbc.reset(),

@@ -18,7 +18,10 @@ pub struct MBC1 {
 
 impl MBC1 {
     pub fn reset(&mut self) {
-        *self = MBC1::default();
+        *self = Self {
+            sram: std::mem::take(&mut self.sram),
+            ..MBC1::default()
+        };
     }
 
     fn rom_bank_1_addr_base(&self) -> usize {
@@ -261,7 +264,10 @@ impl Default for MBC3 {
 
 impl MBC3 {
     pub fn reset(&mut self) {
-        *self = MBC3::default();
+        *self = Self {
+            sram: std::mem::take(&mut self.sram),
+            ..MBC3::default()
+        };
     }
 
     fn rom_bank_1_addr_base(&self) -> usize {
@@ -407,7 +413,10 @@ impl Default for MBC5 {
 
 impl MBC5 {
     pub fn reset(&mut self) {
-        *self = MBC5::default();
+        *self = Self {
+            sram: std::mem::take(&mut self.sram),
+            ..MBC5::default()
+        };
     }
 
     fn rom_bank_1_addr_base(&self) -> usize {
