@@ -84,6 +84,27 @@ pub mod reg {
     pub const WX  : u16 = 0xFF4B;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum Mode {
+    HBlank = 0,
+    VBlank = 1,
+    OamSearch = 2,
+    PixelTransfer = 3,
+}
+
+impl From<u8> for Mode {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => Mode::HBlank,
+            1 => Mode::VBlank,
+            2 => Mode::OamSearch,
+            3 => Mode::PixelTransfer,
+            _ => panic!("not a valid mode {value:02X}"),
+        }
+    }
+}
+
 // TODO: the following clock count is incorrect -- the controller actually
 // starts in mode 2, and mode 3 is variable-length depending on how long it
 // takes to draw sprites in OAM.
@@ -177,14 +198,14 @@ impl LCDController {
     }
 
     #[inline]
-    fn set_mode(&mut self, mode: u8) {
+    fn set_mode(&mut self, mode: Mode) {
         let stat = self.read_reg(reg::STAT) & 0b11111100;
-        self.write_reg(reg::STAT, stat | mode);
+        self.write_reg(reg::STAT, stat | (mode as u8));
     }
 
     #[inline]
-    fn mode(&self) -> u8 {
-        self.read_reg(reg::STAT) & 0b00000011
+    fn mode(&self) -> Mode {
+        Mode::from(self.read_reg(reg::STAT) & 0b00000011)
     }
 
     pub fn tick(&mut self, interrupts: &mut crate::cpu::Interrupts) {
@@ -203,36 +224,31 @@ impl LCDController {
         match line {
             // Not in VBlank
             0..=143 => match clock {
-                0 => self.set_mode(2),
-                20 => self.set_mode(3),
+                0 => self.set_mode(Mode::OamSearch),
+                20 => self.set_mode(Mode::PixelTransfer),
                 63 => {
                     self.update_screen(line as usize);
-                    self.set_mode(0);
+                    self.set_mode(Mode::HBlank);
                 }
                 LAST_CLOCK_IN_SCANLINE => self.write_reg(reg::LY, ly + 1),
                 _ => {}
             },
             // VBlank is about to begin
             144 => match clock {
-                0 => self.set_mode(0),
                 1 => {
                     // VBlank begins -- signal interrupt
-                    self.set_mode(1);
+                    self.set_mode(Mode::VBlank);
                     interrupts.request_vblank();
                 }
                 LAST_CLOCK_IN_SCANLINE => self.write_reg(reg::LY, ly + 1),
                 _ => {}
             },
-            145..=152 => {
-                if clock == LAST_CLOCK_IN_SCANLINE {
-                    self.write_reg(reg::LY, ly + 1);
-                }
+            145..=152 if clock == LAST_CLOCK_IN_SCANLINE => {
+                self.write_reg(reg::LY, ly + 1);
             }
             // Last VBlank line
-            LAST_SCANLINE => {
-                if clock == 1 {
-                    self.write_reg(reg::LY, 0);
-                }
+            LAST_SCANLINE if clock == 1 => {
+                self.write_reg(reg::LY, 0);
             }
             _ => {}
         };
@@ -247,9 +263,9 @@ impl LCDController {
         let old_stat_signal = self.stat_signal;
         self.stat_signal =
             (ly_equals_lyc && stat_interrupt_on_lyc && clock == 1)
-                || (self.mode() == 0 && stat_interrupt_on_mode0)
-                || (self.mode() == 1 && stat_interrupt_on_mode1)
-                || (self.mode() == 2 && stat_interrupt_on_mode2);
+                || (self.mode() as u8 == 0 && stat_interrupt_on_mode0)
+                || (self.mode() as u8 == 1 && stat_interrupt_on_mode1)
+                || (self.mode() as u8 == 2 && stat_interrupt_on_mode2);
         if !old_stat_signal && self.stat_signal {
             interrupts.request_lcd_stat();
         }
@@ -283,7 +299,8 @@ impl LCDController {
 
     #[inline]
     fn oam_is_inaccessible(&self) -> bool {
-        self.lcd_display_enabled() && (self.mode() == 2 || self.mode() == 3)
+        self.lcd_display_enabled()
+            && matches!(self.mode(), Mode::OamSearch | Mode::PixelTransfer)
     }
 
     #[inline]
@@ -301,7 +318,7 @@ impl LCDController {
 
     #[inline]
     fn vram_is_inaccessible(&self) -> bool {
-        self.lcd_display_enabled() && self.mode() == 3
+        self.lcd_display_enabled() && self.mode() == Mode::PixelTransfer
     }
 
     #[inline]
@@ -584,6 +601,7 @@ impl LCDController {
                 continue;
             }
 
+            let bg_palette = Self::reg_to_palette(self.read_reg(reg::BGP));
             let bg_takes_priority = utils::bit_set(attrs, 7);
             let y_flip = utils::bit_set(attrs, 6);
             let x_flip = utils::bit_set(attrs, 5);
@@ -609,6 +627,7 @@ impl LCDController {
                         x_plus_8 as usize,
                         x_flip,
                         bg_takes_priority,
+                        &bg_palette,
                     );
                 }
                 ObjSize::Large => {
@@ -626,6 +645,7 @@ impl LCDController {
                             x_plus_8 as usize,
                             x_flip,
                             bg_takes_priority,
+                            &bg_palette,
                         );
                     } else {
                         // bot tile
@@ -641,6 +661,7 @@ impl LCDController {
                             x_plus_8 as usize,
                             x_flip,
                             bg_takes_priority,
+                            &bg_palette,
                         );
                     };
                 }
@@ -658,6 +679,7 @@ impl LCDController {
         x_plus_8: usize,
         x_flip: bool,
         bg_takes_priority: bool,
+        bg_palette: &[u8; 4],
     ) {
         for tile_x in 0..8 {
             let pixel = tile_y * 8 + tile_x;
@@ -674,12 +696,13 @@ impl LCDController {
             }
             let color_num = pixel_color_num_in_tile(tile_data, pixel);
             if color_num == 0 {
+                // Color 0 acts translucent for OBJs
                 continue;
             }
             let color = palette[color_num as usize];
             let offset = screen_y * SCREEN_WIDTH + screen_x;
             let bg_color = screen[offset];
-            if bg_takes_priority && bg_color != colors::WHITE {
+            if bg_takes_priority && bg_color != bg_palette[0] {
                 continue;
             }
             screen[offset] = color;
@@ -912,7 +935,7 @@ mod tests {
         let mut ppu = LCDController::default();
         // First enable LCD power
         ppu.write_reg(reg::LCDC, 0x80);
-        assert_eq!(ppu.mode(), 0);
+        assert_eq!(ppu.mode(), Mode::HBlank);
         // Simulate 144 lines before VBlank
         let mut interrupts = crate::cpu::Interrupts::default();
         for _ in 0..144 {
@@ -922,10 +945,10 @@ mod tests {
         }
         // Should be right before VBlank, but not quite there yet
         assert!(!interrupts.vblank_requested());
-        assert_eq!(ppu.mode(), 0);
+        assert_eq!(ppu.mode(), Mode::HBlank);
         ppu.tick(&mut interrupts);
         ppu.tick(&mut interrupts);
-        assert_eq!(ppu.mode(), 1);
+        assert_eq!(ppu.mode(), Mode::VBlank);
         assert!(interrupts.vblank_requested());
     }
 }

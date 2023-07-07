@@ -41,9 +41,9 @@ impl crate::ppu::ExternalScreenBuffer for ScreenBuffer {
     fn write_pixel(&mut self, idx: usize, raw_pixel: u8) {
         use crate::ppu::colors;
         let luminosity = match raw_pixel & 0x3 {
-            colors::WHITE => 0xFC,
-            colors::LGRAY => 0xD3,
-            colors::DGRAY => 0x5A,
+            colors::WHITE => 0xFF,
+            colors::LGRAY => 0xB2,
+            colors::DGRAY => 0x66,
             colors::BLACK => 0x00,
             _ => unreachable!(),
         };
