@@ -17,13 +17,14 @@ impl Cartridge {
             data.len() >= THIRTY_TWO_K,
             "cart must be at least 32K bytes long"
         );
+        let num_rom_banks = data[0x148];
         let mbc = match data[0x147] {
             0x00 => MBC::None {
                 sram: Default::default(),
             },
-            0x01..=0x03 => MBC::MBC1(mappers::MBC1::default()),
+            0x01..=0x03 => MBC::MBC1(mappers::MBC1::new(num_rom_banks)),
             0x0F..=0x13 => MBC::MBC3(mappers::MBC3::default()),
-            0x19 => MBC::MBC5(mappers::MBC5::default()),
+            0x19..=0x1E => MBC::MBC5(mappers::MBC5::default()),
             type_ => todo!("cartridge type {type_:02X} unsupported"),
         };
         Cartridge { data, mbc }

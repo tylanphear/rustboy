@@ -7,28 +7,57 @@ use crate::utils::mem::Mem;
 
 const ROM_BANK_SIZE: usize = SIXTEEN_K;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct MBC1 {
     ram_enable: bool,
     bank_mode_select: u8,
     rom_bank_lower5: u8,
     ram_or_rom_upper2: u8,
+    ram_or_rom_upper2_is_rom: bool,
     sram: Mem<EIGHT_K>,
 }
 
+impl std::fmt::Debug for MBC1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MBC1")
+            .field("ram_enable", &self.ram_enable)
+            .field("bank_mode_select", &self.bank_mode_select)
+            .field("rom_bank_lower5", &self.rom_bank_lower5)
+            .field("ram_or_rom_upper2", &self.ram_or_rom_upper2)
+            .field("sram (size)", &self.sram.len())
+            .finish()
+    }
+}
+
 impl MBC1 {
+    pub fn new(num_rom_banks: u8) -> Self {
+        Self {
+            ram_enable: false,
+            bank_mode_select: 0,
+            rom_bank_lower5: 0,
+            ram_or_rom_upper2: 0,
+            ram_or_rom_upper2_is_rom: num_rom_banks >= 64,
+            sram: Default::default(),
+        }
+    }
+
     pub fn reset(&mut self) {
-        *self = Self {
-            sram: std::mem::take(&mut self.sram),
-            ..MBC1::default()
-        };
+        self.ram_enable = false;
+        self.bank_mode_select = 0;
+        self.rom_bank_lower5 = 0;
+        self.ram_or_rom_upper2 = 0;
     }
 
     fn rom_bank_1_addr_base(&self) -> usize {
         // Map bank num 0x00 to 0x01, 0x20 to 0x21, etc.
-        let rom_bank_num = (self.rom_bank_lower5 as usize)
-            | (self.rom_bank_lower5 == 0) as usize
-            | (self.ram_or_rom_upper2 as usize) << 5;
+        let rom_bank_num = if self.ram_or_rom_upper2_is_rom {
+            (self.rom_bank_lower5 as usize)
+                | (self.rom_bank_lower5 == 0) as usize
+                | ((self.ram_or_rom_upper2 as usize) << 5)
+        } else {
+            (self.rom_bank_lower5 as usize)
+                | (self.rom_bank_lower5 == 0) as usize
+        };
         rom_bank_num * ROM_BANK_SIZE
     }
 
