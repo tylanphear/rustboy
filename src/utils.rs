@@ -226,4 +226,12 @@ mod tests {
             0b1111_1111_1111_1111
         );
     }
+
+    #[test]
+    fn lo_bits() {
+        assert_eq!(lo_bits_of(0b1111_0000, 5), 0b10000);
+        assert_eq!(lo_bits_of(0b1111_1110, 5), 0b11110);
+        assert_eq!(lo_bits_of(0b1111_1110, 0), 0b0);
+        assert_eq!(lo_bits_of(0b1111_1110, 8), 0b1111_1110);
+    }
 }
