@@ -1,18 +1,18 @@
 pub mod log {
     use crate::utils::{constants::SIXTY_FOUR_K, BoundedLog};
     use once_cell::sync::Lazy;
-    use parking_lot::RwLock;
+    use std::sync::RwLock;
     pub static LOG: Lazy<RwLock<BoundedLog<SIXTY_FOUR_K, 1000>>> =
         Lazy::new(|| RwLock::new(Default::default()));
 
     pub fn push<S: AsRef<str>>(data: S) {
-        let mut log = LOG.write();
+        let mut log = LOG.write().unwrap();
         log.push(data.as_ref());
         log.push("\n");
     }
 
     pub fn reset() {
-        LOG.write().clear()
+        LOG.write().unwrap().clear()
     }
 
     #[macro_export]
@@ -25,7 +25,7 @@ pub mod log {
     #[macro_export]
     macro_rules! debug_log_as_str {
         ($($args:tt)*) => {{
-            $crate::debug::log::LOG.read().as_str()
+            $crate::debug::log::LOG.read().unwrap().as_str()
         }};
     }
 }

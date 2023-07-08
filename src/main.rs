@@ -15,7 +15,7 @@
 ///         | CPU Speed | NOP Inst
 /// M-Cycle | 1.05MHz   | 1 cycle
 /// T-Cycle | 4.19MHz   | 4 cycles
-use parking_lot::Mutex;
+use std::sync::Mutex;
 use std::{error::Error, ops::ControlFlow};
 
 const TICK_DURATION: std::time::Duration = std::time::Duration::from_nanos(
@@ -110,22 +110,22 @@ fn main() -> Result<(), Box<dyn Error>> {
         let audio_thread = s.spawn(move || {
             audio::main_loop(
                 move |rate: u32, channels: u16| {
-                    let mut ctx = ctx.lock();
+                    let mut ctx = ctx.lock().unwrap();
                     audio_init(&mut ctx, rate, channels);
                 },
                 move || {
-                    let ctx = ctx.lock();
+                    let ctx = ctx.lock().unwrap();
                     audio_tick(&ctx)
                 },
                 move |data: &mut [f32]| {
-                    let mut ctx = ctx.lock();
+                    let mut ctx = ctx.lock().unwrap();
                     audio_callback(&mut ctx, data);
                 },
             )
         });
         let compute_thread = s.spawn(|| compute_thread_(ctx));
         gui_thread.join().unwrap();
-        ctx.lock().exit_requested = true;
+        ctx.lock().unwrap().exit_requested = true;
         compute_thread.join().unwrap();
         audio_thread.join().unwrap();
     });
@@ -423,7 +423,7 @@ fn reset_cpu(cpu: &mut CPU) {
 fn compute_thread_(ctx: &Mutex<RunCtx>) {
     let mut last_tick_time;
     loop {
-        let mut ctx = ctx.lock();
+        let mut ctx = ctx.lock().unwrap();
         if ctx.exit_requested {
             ctx.cpu.mmu.dump_cart_sram();
             break;
@@ -503,7 +503,7 @@ struct GuiClient<'a> {
 
 impl<'a> gui::Client for GuiClient<'a> {
     fn handle_event(&mut self, event: gui::Event) -> ControlFlow<()> {
-        let mut ctx = self.ctx.lock();
+        let mut ctx = self.ctx.lock().unwrap();
         use crate::io::joypad::keys as joypad;
         use sdl2::keyboard::Keycode as K;
 
@@ -579,7 +579,7 @@ impl<'a> gui::Client for GuiClient<'a> {
     }
 
     fn draw_ui(&mut self, ui: &imgui::Ui, screen_texture_id: imgui::TextureId) {
-        let mut ctx = self.ctx.lock();
+        let mut ctx = self.ctx.lock().unwrap();
 
         if ctx.debug {
             Self::draw_debug_ui(ui, screen_texture_id, &mut ctx);
