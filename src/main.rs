@@ -607,6 +607,16 @@ impl<'a> gui::Client for GuiClient<'a> {
                         )
                         .build();
                 });
+            ui.window("volume")
+                .position(
+                    [DISPLAY_POS[X] + DISPLAY_SIZE[X], DISPLAY_POS[Y]],
+                    imgui::Condition::FirstUseEver,
+                )
+                .size([150.0, 100.0], imgui::Condition::Always)
+                .build(|| {
+                    ui.slider("vol", 0.0, 100.0, &mut ctx.volumes[0]);
+                })
+                .unwrap();
         }
     }
 

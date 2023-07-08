@@ -625,8 +625,20 @@ impl APU {
             (self.regs.read(reg::NR50) >> 0) & 0b111,
         );
 
-        let ext_vol_percent =
-            |n: usize| -> f32 { self.external_volumes[n] / 100.0 };
+        let ext_vol_percent = |n: usize| -> f32 {
+            // external volume ranges from 0 to 100
+            // we want 0 to give a multiplier of 0,
+            //    and 100 to give a multiplier of 1,
+            // with exponential scaling from 0 to 100
+            //
+            const SCALE_FACTOR: f32 = 1.1;
+            let pct = self.external_volumes[n] / 100.0;
+            if pct == 0.0 {
+                0.0
+            } else {
+                f32::powf(10.0, pct * SCALE_FACTOR - SCALE_FACTOR)
+            }
+        };
         let mix = |ch1: f32, ch2: f32, ch3: f32, ch4: f32, volume: u8| {
             let channels = (ch1 * ext_vol_percent(1)
                 + ch2 * ext_vol_percent(2)
