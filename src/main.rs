@@ -176,235 +176,6 @@ struct RunCtx {
     volumes: [f32; 5],
 }
 
-fn draw_ui_(ui: &imgui::Ui, frame: imgui::TextureId, ctx: &mut RunCtx) {
-    use crate::utils::Dump;
-    let mut dump_str = String::with_capacity(0x1000);
-    macro_rules! dump {
-        ($e:expr) => {{
-            dump_str.clear();
-            ($e).dump(&mut dump_str).unwrap();
-            &dump_str
-        }};
-    }
-    if ctx.debug {
-        const X: usize = 0;
-        const Y: usize = 1;
-        const DISPLAY_SCALE: f32 = 2.5;
-        const DISPLAY_POS: [f32; 2] = [020.0, 000.0];
-        const DISPLAY_SIZE: [f32; 2] =
-            [DISPLAY_SCALE * 160.0, DISPLAY_SCALE * 144.0];
-        fn sum(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
-            [a[0] + b[0], a[1] + b[1]]
-        }
-        ui.window("display")
-            .size(DISPLAY_SIZE, imgui::Condition::Always)
-            .position(DISPLAY_POS, imgui::Condition::Always)
-            .movable(false)
-            .build(|| {
-                ui.get_window_draw_list()
-                    .add_image(
-                        frame,
-                        sum(ui.window_pos(), ui.window_content_region_min()),
-                        sum(ui.window_pos(), ui.window_content_region_max()),
-                    )
-                    .build();
-            });
-        const LCD_POS: [f32; 2] =
-            [DISPLAY_POS[X], DISPLAY_POS[Y] + DISPLAY_SIZE[Y]];
-        const LCD_SIZE: [f32; 2] = [DISPLAY_SIZE[X] / 2.0, 200.0];
-        ui.window("lcd")
-            .size(LCD_SIZE, imgui::Condition::FirstUseEver)
-            .position(LCD_POS, imgui::Condition::FirstUseEver)
-            .movable(false)
-            .build(|| {
-                ui.text(format!(
-                    "TICK RATE: {}",
-                    TICKS_TO_ADVANCE_PER_RUN_STEP
-                ));
-                ui.text_wrapped(dump!(ctx.cpu.mmu.io.lcd));
-            })
-            .unwrap();
-        const JOYPAD_POS: [f32; 2] = [LCD_POS[X] + LCD_SIZE[X], LCD_POS[Y]];
-        const JOYPAD_SIZE: [f32; 2] = [DISPLAY_SIZE[X] / 2.0, 100.0];
-        ui.window("joypad")
-            .size(JOYPAD_SIZE, imgui::Condition::FirstUseEver)
-            .position(JOYPAD_POS, imgui::Condition::FirstUseEver)
-            .movable(false)
-            .build(|| {
-                ui.text_wrapped(dump!(ctx.cpu.mmu.io.joypad));
-            })
-            .unwrap();
-        const VOLUME_POS: [f32; 2] =
-            [JOYPAD_POS[X], JOYPAD_POS[Y] + JOYPAD_SIZE[Y]];
-        const VOLUME_SIZE: [f32; 2] = [JOYPAD_SIZE[X], 200.0];
-        ui.window("volume")
-            .size(VOLUME_SIZE, imgui::Condition::FirstUseEver)
-            .position(VOLUME_POS, imgui::Condition::FirstUseEver)
-            .build(|| {
-                ui.slider("master", 0.0, 100.0, &mut ctx.volumes[0]);
-                ui.slider("channel 1", 0.0, 100.0, &mut ctx.volumes[1]);
-                ui.slider("channel 2", 0.0, 100.0, &mut ctx.volumes[2]);
-                ui.slider("channel 3", 0.0, 100.0, &mut ctx.volumes[3]);
-                ui.slider("channel 4", 0.0, 100.0, &mut ctx.volumes[4]);
-            })
-            .unwrap();
-        const REGS_POS: [f32; 2] =
-            [DISPLAY_POS[X] + DISPLAY_SIZE[X], DISPLAY_POS[Y]];
-        const REGS_SIZE: [f32; 2] = [220.0, 300.0];
-        ui.window("regs")
-            .size(REGS_SIZE, imgui::Condition::FirstUseEver)
-            .position(REGS_POS, imgui::Condition::FirstUseEver)
-            .movable(false)
-            .build(|| {
-                ui.text_wrapped(dump!(ctx.cpu));
-            })
-            .unwrap();
-        const CONTROLS_POS: [f32; 2] =
-            [REGS_POS[X], REGS_POS[Y] + REGS_SIZE[Y]];
-        const CONTROLS_SIZE: [f32; 2] = [REGS_SIZE[X], 300.0];
-        ui.window("controls")
-            .size(CONTROLS_SIZE, imgui::Condition::FirstUseEver)
-            .position(CONTROLS_POS, imgui::Condition::FirstUseEver)
-            .movable(false)
-            .build(|| {
-                let mut scratch = String::new();
-                let bp_changed = ui
-                    .input_text("breakpoint", &mut scratch)
-                    .enter_returns_true(true)
-                    .build();
-                if bp_changed {
-                    if let Some(addr) = parse_addr(&scratch) {
-                        ctx.cpu.breakpoints.register(addr);
-                    }
-                }
-                scratch.clear();
-                ui.input_float("speedup", &mut ctx.speedup_factor).build();
-                let breaks = ctx.cpu.breakpoints.dump();
-                if !breaks.is_empty() {
-                    ui.text(breaks);
-                }
-                let wp_changed = ui
-                    .input_text("watchpoint", &mut scratch)
-                    .enter_returns_true(true)
-                    .build();
-                if wp_changed {
-                    if let Some(addr) = parse_addr(&scratch) {
-                        ctx.cpu.mmu.register_watchpoint(addr);
-                    }
-                }
-                scratch.clear();
-                ctx.cpu.mmu.dump_watchpoints(&mut scratch).unwrap();
-                if !scratch.is_empty() {
-                    ui.text_wrapped(scratch);
-                }
-            })
-            .unwrap();
-        const CART_POS: [f32; 2] =
-            [CONTROLS_POS[X] + CONTROLS_SIZE[X], CONTROLS_POS[Y]];
-        const CART_SIZE: [f32; 2] = [200.0, 200.0];
-        ui.window("cartridge")
-            .size(CART_SIZE, imgui::Condition::FirstUseEver)
-            .position(CART_POS, imgui::Condition::FirstUseEver)
-            .build(|| {
-                if let Some(ref cart) = ctx.cpu.mmu.cartridge {
-                    ui.text_wrapped(dump!(cart));
-                }
-            })
-            .unwrap();
-        const TIMER_POS: [f32; 2] = [LCD_POS[X], LCD_POS[Y] + LCD_SIZE[Y]];
-        const TIMER_SIZE: [f32; 2] = [LCD_SIZE[X], 150.0];
-        ui.window("timer")
-            .size(TIMER_SIZE, imgui::Condition::FirstUseEver)
-            .position(TIMER_POS, imgui::Condition::FirstUseEver)
-            .movable(false)
-            .build(|| {
-                ui.text_wrapped(dump!(ctx.cpu.mmu.io.timer));
-            })
-            .unwrap();
-        const DISASM_POS: [f32; 2] = [REGS_POS[X] + REGS_SIZE[X], REGS_POS[Y]];
-        const DISASM_SIZE: [f32; 2] = [200.0, 300.0];
-        ui.window("disassembly")
-            .size(DISASM_SIZE, imgui::Condition::FirstUseEver)
-            .position(DISASM_POS, imgui::Condition::FirstUseEver)
-            .movable(false)
-            .build(|| {
-                // TODO: this is hack: we can't be sure the last instruction
-                // boundary was 16 bytes ago, since CB-prefixed instructions
-                // are 2-bytes wide.
-                let adjusted_pc = ctx.cpu.regs.pc.saturating_sub(16);
-
-                let current_offset = (ctx.cpu.regs.pc - adjusted_pc) as usize;
-                let bytes = ctx.cpu.mmu.block_load(adjusted_pc, usize::MAX);
-                let insts: Vec<_> = disassembler::InstIter::new(bytes)
-                    .map_while(|it| {
-                        (it.offset < current_offset
-                            || !opcodes::is_unconditional_jump(it.code()))
-                        .then(|| {
-                            format!(
-                                "{}{:04X}: {}",
-                                if it.offset == current_offset {
-                                    "-->"
-                                } else {
-                                    "   "
-                                },
-                                adjusted_pc + (it.offset as u16),
-                                it.to_string()
-                            )
-                        })
-                    })
-                    .collect();
-                ui.text_wrapped(insts.join("\n"));
-            })
-            .unwrap();
-        const APU_POS: [f32; 2] =
-            [DISASM_POS[X] + DISASM_SIZE[X], DISASM_POS[Y]];
-        const APU_SIZE: [f32; 2] = [300.0, 300.0];
-        ui.window("apu")
-            .size(APU_SIZE, imgui::Condition::FirstUseEver)
-            .position(APU_POS, imgui::Condition::FirstUseEver)
-            .movable(false)
-            .build(|| {
-                ui.text_wrapped(dump!(ctx.cpu.mmu.io.apu));
-            })
-            .unwrap();
-        const LOG_POS: [f32; 2] = [CART_POS[X] + CART_SIZE[X], CART_POS[Y]];
-        const LOG_SIZE: [f32; 2] = [400.0, 400.0];
-        ui.window("log")
-            .size(LOG_SIZE, imgui::Condition::FirstUseEver)
-            .position(LOG_POS, imgui::Condition::FirstUseEver)
-            .movable(false)
-            .build(|| {
-                ui.text_wrapped(debug_log_as_str!());
-                ui.set_scroll_here_y_with_ratio(1.0);
-            })
-            .unwrap();
-    } else {
-        const SCALE: f32 = 4.0;
-        ui.window("display")
-            .size(
-                [SCALE * 160.0 + 50.0, SCALE * 144.0 + 50.0],
-                imgui::Condition::Always,
-            )
-            .position([010.0, 000.0], imgui::Condition::Always)
-            .movable(false)
-            .build(|| {
-                const X_OFFSET: f32 = 25.0;
-                const Y_OFFSET: f32 = 25.0;
-                let [win_x, win_y] = ui.window_pos();
-                ui.get_window_draw_list()
-                    .add_image(
-                        frame,
-                        [win_x + X_OFFSET, win_y + Y_OFFSET],
-                        [
-                            win_x + SCALE * 160.0 + X_OFFSET,
-                            win_y + SCALE * 144.0 + Y_OFFSET,
-                        ],
-                    )
-                    .build();
-            });
-    }
-}
-
 fn parse_addr(break_addr_str: &str) -> Option<u16> {
     if let Some(hex_addr) = break_addr_str.strip_prefix("0x") {
         u16::from_str_radix(hex_addr, 16).ok()
@@ -581,29 +352,247 @@ impl<'a> gui::Client for GuiClient<'a> {
     fn draw_ui(&mut self, ui: &imgui::Ui, screen_texture_id: imgui::TextureId) {
         let mut ctx = self.ctx.lock().unwrap();
 
+        const X: usize = 0;
+        const Y: usize = 1;
+        fn sum(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
+            [a[0] + b[0], a[1] + b[1]]
+        }
         if ctx.debug {
-            Self::draw_debug_ui(ui, screen_texture_id, &mut ctx);
-        } else {
-            const SCALE: f32 = 4.0;
+            use crate::utils::Dump;
+            let mut dump_str = String::with_capacity(0x1000);
+            macro_rules! dump {
+                ($e:expr) => {{
+                    dump_str.clear();
+                    ($e).dump(&mut dump_str).unwrap();
+                    &dump_str
+                }};
+            }
+
+            const DISPLAY_SCALE: f32 = 2.5;
+            const DISPLAY_POS: [f32; 2] = [020.0, 000.0];
+            const DISPLAY_SIZE: [f32; 2] =
+                [DISPLAY_SCALE * 160.0, DISPLAY_SCALE * 144.0];
             ui.window("display")
-                .size(
-                    [SCALE * 160.0 + 50.0, SCALE * 144.0 + 50.0],
-                    imgui::Condition::Always,
-                )
-                .position([010.0, 000.0], imgui::Condition::Always)
+                .size(DISPLAY_SIZE, imgui::Condition::Always)
+                .position(DISPLAY_POS, imgui::Condition::Always)
                 .movable(false)
                 .build(|| {
-                    const X_OFFSET: f32 = 25.0;
-                    const Y_OFFSET: f32 = 25.0;
-                    let [win_x, win_y] = ui.window_pos();
                     ui.get_window_draw_list()
                         .add_image(
                             screen_texture_id,
-                            [win_x + X_OFFSET, win_y + Y_OFFSET],
-                            [
-                                win_x + SCALE * 160.0 + X_OFFSET,
-                                win_y + SCALE * 144.0 + Y_OFFSET,
-                            ],
+                            sum(
+                                ui.window_pos(),
+                                ui.window_content_region_min(),
+                            ),
+                            sum(
+                                ui.window_pos(),
+                                ui.window_content_region_max(),
+                            ),
+                        )
+                        .build();
+                });
+            const LCD_POS: [f32; 2] =
+                [DISPLAY_POS[X], DISPLAY_POS[Y] + DISPLAY_SIZE[Y]];
+            const LCD_SIZE: [f32; 2] = [DISPLAY_SIZE[X] / 2.0, 200.0];
+            ui.window("lcd")
+                .size(LCD_SIZE, imgui::Condition::FirstUseEver)
+                .position(LCD_POS, imgui::Condition::FirstUseEver)
+                .movable(false)
+                .build(|| {
+                    ui.text(format!(
+                        "TICK RATE: {}",
+                        TICKS_TO_ADVANCE_PER_RUN_STEP
+                    ));
+                    ui.text_wrapped(dump!(ctx.cpu.mmu.io.lcd));
+                })
+                .unwrap();
+            const JOYPAD_POS: [f32; 2] = [LCD_POS[X] + LCD_SIZE[X], LCD_POS[Y]];
+            const JOYPAD_SIZE: [f32; 2] = [DISPLAY_SIZE[X] / 2.0, 100.0];
+            ui.window("joypad")
+                .size(JOYPAD_SIZE, imgui::Condition::FirstUseEver)
+                .position(JOYPAD_POS, imgui::Condition::FirstUseEver)
+                .movable(false)
+                .build(|| {
+                    ui.text_wrapped(dump!(ctx.cpu.mmu.io.joypad));
+                })
+                .unwrap();
+            const VOLUME_POS: [f32; 2] =
+                [JOYPAD_POS[X], JOYPAD_POS[Y] + JOYPAD_SIZE[Y]];
+            const VOLUME_SIZE: [f32; 2] = [JOYPAD_SIZE[X], 200.0];
+            ui.window("volume")
+                .size(VOLUME_SIZE, imgui::Condition::FirstUseEver)
+                .position(VOLUME_POS, imgui::Condition::FirstUseEver)
+                .build(|| {
+                    ui.slider("master", 0.0, 100.0, &mut ctx.volumes[0]);
+                    ui.slider("channel 1", 0.0, 100.0, &mut ctx.volumes[1]);
+                    ui.slider("channel 2", 0.0, 100.0, &mut ctx.volumes[2]);
+                    ui.slider("channel 3", 0.0, 100.0, &mut ctx.volumes[3]);
+                    ui.slider("channel 4", 0.0, 100.0, &mut ctx.volumes[4]);
+                })
+                .unwrap();
+            const REGS_POS: [f32; 2] =
+                [DISPLAY_POS[X] + DISPLAY_SIZE[X], DISPLAY_POS[Y]];
+            const REGS_SIZE: [f32; 2] = [220.0, 300.0];
+            ui.window("regs")
+                .size(REGS_SIZE, imgui::Condition::FirstUseEver)
+                .position(REGS_POS, imgui::Condition::FirstUseEver)
+                .movable(false)
+                .build(|| {
+                    ui.text_wrapped(dump!(ctx.cpu));
+                })
+                .unwrap();
+            const CONTROLS_POS: [f32; 2] =
+                [REGS_POS[X], REGS_POS[Y] + REGS_SIZE[Y]];
+            const CONTROLS_SIZE: [f32; 2] = [REGS_SIZE[X], 300.0];
+            ui.window("controls")
+                .size(CONTROLS_SIZE, imgui::Condition::FirstUseEver)
+                .position(CONTROLS_POS, imgui::Condition::FirstUseEver)
+                .movable(false)
+                .build(|| {
+                    let mut scratch = String::new();
+                    let bp_changed = ui
+                        .input_text("breakpoint", &mut scratch)
+                        .enter_returns_true(true)
+                        .build();
+                    if bp_changed {
+                        if let Some(addr) = parse_addr(&scratch) {
+                            ctx.cpu.breakpoints.register(addr);
+                        }
+                    }
+                    scratch.clear();
+                    ui.input_float("speedup", &mut ctx.speedup_factor).build();
+                    let breaks = ctx.cpu.breakpoints.dump();
+                    if !breaks.is_empty() {
+                        ui.text(breaks);
+                    }
+                    let wp_changed = ui
+                        .input_text("watchpoint", &mut scratch)
+                        .enter_returns_true(true)
+                        .build();
+                    if wp_changed {
+                        if let Some(addr) = parse_addr(&scratch) {
+                            ctx.cpu.mmu.register_watchpoint(addr);
+                        }
+                    }
+                    scratch.clear();
+                    ctx.cpu.mmu.dump_watchpoints(&mut scratch).unwrap();
+                    if !scratch.is_empty() {
+                        ui.text_wrapped(scratch);
+                    }
+                })
+                .unwrap();
+            const CART_POS: [f32; 2] =
+                [CONTROLS_POS[X] + CONTROLS_SIZE[X], CONTROLS_POS[Y]];
+            const CART_SIZE: [f32; 2] = [200.0, 200.0];
+            ui.window("cartridge")
+                .size(CART_SIZE, imgui::Condition::FirstUseEver)
+                .position(CART_POS, imgui::Condition::FirstUseEver)
+                .build(|| {
+                    if let Some(ref cart) = ctx.cpu.mmu.cartridge {
+                        ui.text_wrapped(dump!(cart));
+                    }
+                })
+                .unwrap();
+            const TIMER_POS: [f32; 2] = [LCD_POS[X], LCD_POS[Y] + LCD_SIZE[Y]];
+            const TIMER_SIZE: [f32; 2] = [LCD_SIZE[X], 150.0];
+            ui.window("timer")
+                .size(TIMER_SIZE, imgui::Condition::FirstUseEver)
+                .position(TIMER_POS, imgui::Condition::FirstUseEver)
+                .movable(false)
+                .build(|| {
+                    ui.text_wrapped(dump!(ctx.cpu.mmu.io.timer));
+                })
+                .unwrap();
+            const DISASM_POS: [f32; 2] =
+                [REGS_POS[X] + REGS_SIZE[X], REGS_POS[Y]];
+            const DISASM_SIZE: [f32; 2] = [200.0, 300.0];
+            ui.window("disassembly")
+                .size(DISASM_SIZE, imgui::Condition::FirstUseEver)
+                .position(DISASM_POS, imgui::Condition::FirstUseEver)
+                .movable(false)
+                .build(|| {
+                    let current_pc = ctx.cpu.regs.pc;
+                    let last_pc =
+                        if let Some(last_op_address) = ctx.last_op_address {
+                            if current_pc > last_op_address
+                                && current_pc - last_op_address <= 3
+                            {
+                                last_op_address
+                            } else {
+                                current_pc
+                            }
+                        } else {
+                            current_pc
+                        };
+                    let bytes = ctx.cpu.mmu.block_load(last_pc, usize::MAX);
+                    let insts: Vec<_> = disassembler::InstIter::new(bytes)
+                        .map_while(|it| {
+                            (it.offset <= current_pc as usize
+                                || !opcodes::is_unconditional_jump(it.code()))
+                            .then(|| {
+                                let address = last_pc + (it.offset as u16);
+                                format!(
+                                    "{}{:04X}: {}",
+                                    if last_pc + (it.offset as u16)
+                                        == current_pc
+                                    {
+                                        "-->"
+                                    } else {
+                                        "   "
+                                    },
+                                    address,
+                                    it.to_string()
+                                )
+                            })
+                        })
+                        .collect();
+                    ui.text_wrapped(insts.join("\n"));
+                })
+                .unwrap();
+            const APU_POS: [f32; 2] =
+                [DISASM_POS[X] + DISASM_SIZE[X], DISASM_POS[Y]];
+            const APU_SIZE: [f32; 2] = [300.0, 300.0];
+            ui.window("apu")
+                .size(APU_SIZE, imgui::Condition::FirstUseEver)
+                .position(APU_POS, imgui::Condition::FirstUseEver)
+                .movable(false)
+                .build(|| {
+                    ui.text_wrapped(dump!(ctx.cpu.mmu.io.apu));
+                })
+                .unwrap();
+            const LOG_POS: [f32; 2] = [CART_POS[X] + CART_SIZE[X], CART_POS[Y]];
+            const LOG_SIZE: [f32; 2] = [400.0, 400.0];
+            ui.window("log")
+                .size(LOG_SIZE, imgui::Condition::FirstUseEver)
+                .position(LOG_POS, imgui::Condition::FirstUseEver)
+                .movable(false)
+                .build(|| {
+                    ui.text_wrapped(debug_log_as_str!());
+                    ui.set_scroll_here_y_with_ratio(1.0);
+                })
+                .unwrap();
+        } else {
+            const DISPLAY_SCALE: f32 = 4.0;
+            const DISPLAY_POS: [f32; 2] = [020.0, 000.0];
+            const DISPLAY_SIZE: [f32; 2] =
+                [DISPLAY_SCALE * 160.0, DISPLAY_SCALE * 144.0];
+            ui.window("display")
+                .position(DISPLAY_POS, imgui::Condition::FirstUseEver)
+                .size(DISPLAY_SIZE, imgui::Condition::Always)
+                .focused(true)
+                .movable(false)
+                .build(|| {
+                    ui.get_window_draw_list()
+                        .add_image(
+                            screen_texture_id,
+                            sum(
+                                ui.window_pos(),
+                                ui.window_content_region_min(),
+                            ),
+                            sum(
+                                ui.window_pos(),
+                                ui.window_content_region_max(),
+                            ),
                         )
                         .build();
                 });
@@ -624,225 +613,7 @@ impl<'a> gui::Client for GuiClient<'a> {
         &mut self,
         screen: &mut gui::ScreenBuffer,
     ) -> crate::io::ppu::RenderUpdate {
-        let ctx = self.ctx.lock();
+        let ctx = self.ctx.lock().unwrap();
         ctx.cpu.mmu.io.lcd.render(screen)
-    }
-}
-
-impl GuiClient<'_> {
-    fn draw_debug_ui(
-        ui: &imgui::Ui,
-        screen_texture_id: imgui::TextureId,
-        ctx: &mut RunCtx,
-    ) {
-        use crate::utils::Dump;
-        let mut dump_str = String::with_capacity(0x1000);
-        macro_rules! dump {
-            ($e:expr) => {{
-                dump_str.clear();
-                ($e).dump(&mut dump_str).unwrap();
-                &dump_str
-            }};
-        }
-
-        const X: usize = 0;
-        const Y: usize = 1;
-        const DISPLAY_SCALE: f32 = 2.5;
-        const DISPLAY_POS: [f32; 2] = [020.0, 000.0];
-        const DISPLAY_SIZE: [f32; 2] =
-            [DISPLAY_SCALE * 160.0, DISPLAY_SCALE * 144.0];
-        fn sum(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
-            [a[0] + b[0], a[1] + b[1]]
-        }
-        ui.window("display")
-            .size(DISPLAY_SIZE, imgui::Condition::Always)
-            .position(DISPLAY_POS, imgui::Condition::Always)
-            .movable(false)
-            .build(|| {
-                ui.get_window_draw_list()
-                    .add_image(
-                        screen_texture_id,
-                        sum(ui.window_pos(), ui.window_content_region_min()),
-                        sum(ui.window_pos(), ui.window_content_region_max()),
-                    )
-                    .build();
-            });
-        const LCD_POS: [f32; 2] =
-            [DISPLAY_POS[X], DISPLAY_POS[Y] + DISPLAY_SIZE[Y]];
-        const LCD_SIZE: [f32; 2] = [DISPLAY_SIZE[X] / 2.0, 200.0];
-        ui.window("lcd")
-            .size(LCD_SIZE, imgui::Condition::FirstUseEver)
-            .position(LCD_POS, imgui::Condition::FirstUseEver)
-            .movable(false)
-            .build(|| {
-                ui.text(format!(
-                    "TICK RATE: {}",
-                    TICKS_TO_ADVANCE_PER_RUN_STEP
-                ));
-                ui.text_wrapped(dump!(ctx.cpu.mmu.io.lcd));
-            })
-            .unwrap();
-        const JOYPAD_POS: [f32; 2] = [LCD_POS[X] + LCD_SIZE[X], LCD_POS[Y]];
-        const JOYPAD_SIZE: [f32; 2] = [DISPLAY_SIZE[X] / 2.0, 100.0];
-        ui.window("joypad")
-            .size(JOYPAD_SIZE, imgui::Condition::FirstUseEver)
-            .position(JOYPAD_POS, imgui::Condition::FirstUseEver)
-            .movable(false)
-            .build(|| {
-                ui.text_wrapped(dump!(ctx.cpu.mmu.io.joypad));
-            })
-            .unwrap();
-        const VOLUME_POS: [f32; 2] =
-            [JOYPAD_POS[X], JOYPAD_POS[Y] + JOYPAD_SIZE[Y]];
-        const VOLUME_SIZE: [f32; 2] = [JOYPAD_SIZE[X], 200.0];
-        ui.window("volume")
-            .size(VOLUME_SIZE, imgui::Condition::FirstUseEver)
-            .position(VOLUME_POS, imgui::Condition::FirstUseEver)
-            .build(|| {
-                ui.slider("master", 0.0, 100.0, &mut ctx.volumes[0]);
-                ui.slider("channel 1", 0.0, 100.0, &mut ctx.volumes[1]);
-                ui.slider("channel 2", 0.0, 100.0, &mut ctx.volumes[2]);
-                ui.slider("channel 3", 0.0, 100.0, &mut ctx.volumes[3]);
-                ui.slider("channel 4", 0.0, 100.0, &mut ctx.volumes[4]);
-            })
-            .unwrap();
-        const REGS_POS: [f32; 2] =
-            [DISPLAY_POS[X] + DISPLAY_SIZE[X], DISPLAY_POS[Y]];
-        const REGS_SIZE: [f32; 2] = [220.0, 300.0];
-        ui.window("regs")
-            .size(REGS_SIZE, imgui::Condition::FirstUseEver)
-            .position(REGS_POS, imgui::Condition::FirstUseEver)
-            .movable(false)
-            .build(|| {
-                ui.text_wrapped(dump!(ctx.cpu));
-            })
-            .unwrap();
-        const CONTROLS_POS: [f32; 2] =
-            [REGS_POS[X], REGS_POS[Y] + REGS_SIZE[Y]];
-        const CONTROLS_SIZE: [f32; 2] = [REGS_SIZE[X], 300.0];
-        ui.window("controls")
-            .size(CONTROLS_SIZE, imgui::Condition::FirstUseEver)
-            .position(CONTROLS_POS, imgui::Condition::FirstUseEver)
-            .movable(false)
-            .build(|| {
-                let mut scratch = String::new();
-                let bp_changed = ui
-                    .input_text("breakpoint", &mut scratch)
-                    .enter_returns_true(true)
-                    .build();
-                if bp_changed {
-                    if let Some(addr) = parse_addr(&scratch) {
-                        ctx.cpu.breakpoints.register(addr);
-                    }
-                }
-                scratch.clear();
-                ui.input_float("speedup", &mut ctx.speedup_factor).build();
-                let breaks = ctx.cpu.breakpoints.dump();
-                if !breaks.is_empty() {
-                    ui.text(breaks);
-                }
-                let wp_changed = ui
-                    .input_text("watchpoint", &mut scratch)
-                    .enter_returns_true(true)
-                    .build();
-                if wp_changed {
-                    if let Some(addr) = parse_addr(&scratch) {
-                        ctx.cpu.mmu.register_watchpoint(addr);
-                    }
-                }
-                scratch.clear();
-                ctx.cpu.mmu.dump_watchpoints(&mut scratch).unwrap();
-                if !scratch.is_empty() {
-                    ui.text_wrapped(scratch);
-                }
-            })
-            .unwrap();
-        const CART_POS: [f32; 2] =
-            [CONTROLS_POS[X] + CONTROLS_SIZE[X], CONTROLS_POS[Y]];
-        const CART_SIZE: [f32; 2] = [200.0, 200.0];
-        ui.window("cartridge")
-            .size(CART_SIZE, imgui::Condition::FirstUseEver)
-            .position(CART_POS, imgui::Condition::FirstUseEver)
-            .build(|| {
-                if let Some(ref cart) = ctx.cpu.mmu.cartridge {
-                    ui.text_wrapped(dump!(cart));
-                }
-            })
-            .unwrap();
-        const TIMER_POS: [f32; 2] = [LCD_POS[X], LCD_POS[Y] + LCD_SIZE[Y]];
-        const TIMER_SIZE: [f32; 2] = [LCD_SIZE[X], 150.0];
-        ui.window("timer")
-            .size(TIMER_SIZE, imgui::Condition::FirstUseEver)
-            .position(TIMER_POS, imgui::Condition::FirstUseEver)
-            .movable(false)
-            .build(|| {
-                ui.text_wrapped(dump!(ctx.cpu.mmu.io.timer));
-            })
-            .unwrap();
-        const DISASM_POS: [f32; 2] = [REGS_POS[X] + REGS_SIZE[X], REGS_POS[Y]];
-        const DISASM_SIZE: [f32; 2] = [200.0, 300.0];
-        ui.window("disassembly")
-            .size(DISASM_SIZE, imgui::Condition::FirstUseEver)
-            .position(DISASM_POS, imgui::Condition::FirstUseEver)
-            .movable(false)
-            .build(|| {
-                let current_pc = ctx.cpu.regs.pc;
-                let last_pc = if let Some(last_op_address) = ctx.last_op_address
-                {
-                    if current_pc > last_op_address
-                        && current_pc - last_op_address <= 3
-                    {
-                        last_op_address
-                    } else {
-                        current_pc
-                    }
-                } else {
-                    current_pc
-                };
-                let bytes = ctx.cpu.mmu.block_load(last_pc, usize::MAX);
-                let insts: Vec<_> = disassembler::InstIter::new(bytes)
-                    .map_while(|it| {
-                        (it.offset <= current_pc as usize
-                            || !opcodes::is_unconditional_jump(it.code()))
-                        .then(|| {
-                            let address = last_pc + (it.offset as u16);
-                            format!(
-                                "{}{:04X}: {}",
-                                if last_pc + (it.offset as u16) == current_pc {
-                                    "-->"
-                                } else {
-                                    "   "
-                                },
-                                address,
-                                it.to_string()
-                            )
-                        })
-                    })
-                    .collect();
-                ui.text_wrapped(insts.join("\n"));
-            })
-            .unwrap();
-        const APU_POS: [f32; 2] =
-            [DISASM_POS[X] + DISASM_SIZE[X], DISASM_POS[Y]];
-        const APU_SIZE: [f32; 2] = [300.0, 300.0];
-        ui.window("apu")
-            .size(APU_SIZE, imgui::Condition::FirstUseEver)
-            .position(APU_POS, imgui::Condition::FirstUseEver)
-            .movable(false)
-            .build(|| {
-                ui.text_wrapped(dump!(ctx.cpu.mmu.io.apu));
-            })
-            .unwrap();
-        const LOG_POS: [f32; 2] = [CART_POS[X] + CART_SIZE[X], CART_POS[Y]];
-        const LOG_SIZE: [f32; 2] = [400.0, 400.0];
-        ui.window("log")
-            .size(LOG_SIZE, imgui::Condition::FirstUseEver)
-            .position(LOG_POS, imgui::Condition::FirstUseEver)
-            .movable(false)
-            .build(|| {
-                ui.text_wrapped(debug_log_as_str!());
-                ui.set_scroll_here_y_with_ratio(1.0);
-            })
-            .unwrap();
     }
 }
