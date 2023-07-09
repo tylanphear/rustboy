@@ -172,58 +172,65 @@ impl CPU {
         let mut this_tick = Tick::default();
         this_tick.pc = self.regs.pc;
 
-        // Now tick devices (MMU/LCD/Timer) and check for interrupts that need
-        // to be flagged in IF. Do this *before* we possibly dispatch an
-        // interrupt this tick.
+        // Tick devices (MMU/LCD/Timer) and check for interrupts that need to
+        // be flagged in IF. Do this *before* we possibly dispatch an interrupt
+        // this tick.
         self.tick_devices_and_check_interrupts();
 
         // Check if we're halted. If so, and there is an interrupt requested,
         // un-halt and continue execution.
         match self.state {
             State::Halted => self.unhalt_if_interrupt_requested(),
-            State::InterruptDelay(CYCLES_PER_TICK) => {
-                self.state = State::RetiringOp(0)
+            State::InterruptDelay(ref mut delay) => {
+                *delay -= CYCLES_PER_TICK;
+                if *delay == 0 {
+                    self.state = State::RetiringOp(0);
+                }
             }
-            State::InterruptDelay(ref mut delay) => *delay -= CYCLES_PER_TICK,
             _ => {}
         }
 
-        // We possibly fetched an instruction, or are currently executing an
-        // instruction. If the instruction finishes this cycle, mark the
-        // instruction as retired; otherwise tick one cycle.
+        // CPU is semi-pipelined: fetch/execute can occur on the same tick.
+        // e.g:
+        //
+        // | Execute | . | R | * | R |
+        // | Fetch   | * | * | . | * |
+        // | Tick    | 1 | 2 | 3 | 4 |
+        //
+        // Pipeline stage 0: handle executing or retiring ops.
         match self.state {
-            State::ExecutingOp(CYCLES_PER_TICK) => {
-                // Some instructions conditionally require extra cycles (e.g.
-                // taken branches).
-                let extra_cycles =
+            State::ExecutingOp(ref mut cycles) => {
+                *cycles -= CYCLES_PER_TICK;
+                if *cycles == 0 {
+                    // Execute the instruction and check for extra cycles (in
+                    // the case of branches).
                     self.execute_one_op(self.current_op.unwrap());
-                if self.state != State::Halted {
-                    self.state = State::RetiringOp(extra_cycles);
                 }
             }
-            State::ExecutingOp(ref mut cycles)
-            | State::RetiringOp(ref mut cycles)
-                if *cycles > 0 =>
-            {
-                *cycles -= CYCLES_PER_TICK;
+            State::RetiringOp(ref mut cycles) => {
+                if *cycles > 0 {
+                    *cycles -= CYCLES_PER_TICK;
+                }
             }
             _ => {}
         };
 
-        // Check if we're ready to fetch a new instruction (i.e. the
-        // currently-executing op is retiring.) Check if we need to enable
-        // interrupts, then possibly handle an interrupt (i.e. jump to the
-        // interrupt vector). Once that's done, fetch/decode the instruction at
-        // the current PC.
-        if let State::RetiringOp(0) = self.state {
+        // Pipeline stage 1: fetch the next instruction.
+        if self.state == State::RetiringOp(0) {
             this_tick.op_was_retired = true;
 
+            // We're ready to fetch a new instruction. First, check if we
+            // need to enable interrupts, then possibly handle an interrupt
+            // (i.e. jump to the interrupt vector).
             self.enable_interrupts_if_scheduled();
             let interrupt_was_dispatched = self.handle_interrupts();
             if interrupt_was_dispatched {
                 this_tick.pc = self.regs.pc;
                 return this_tick;
             }
+
+            // Now perform the actual fetch, and mark our current state as
+            // executing.
             let next_op = self.fetch_and_decode_one_op();
             self.current_op = Some(next_op);
             self.state = State::ExecutingOp(next_op.clocks as u64);
@@ -231,7 +238,7 @@ impl CPU {
             if self.breakpoints.check_hit(&self.regs.pc) {
                 this_tick.breakpoint_was_hit = true;
             }
-        };
+        }
 
         this_tick
     }
@@ -282,14 +289,18 @@ impl CPU {
         }
     }
 
-    fn execute_one_op(&mut self, op: &Op) -> u64 {
+    fn execute_one_op(&mut self, op: &Op) {
         let status = (op.handler)(self, op.args, op.num_bytes);
         match status {
             OpStatus::Normal => {
                 self.regs.pc += op.num_bytes as u16;
-                0
+                if self.state != State::Halted && self.state != State::Stopped {
+                    self.state = State::RetiringOp(0);
+                }
             }
-            OpStatus::BranchTaken(extra_cycles) => extra_cycles as u64,
+            OpStatus::BranchTaken(extra_cycles) => {
+                self.state = State::RetiringOp(extra_cycles as u64);
+            }
         }
     }
 
