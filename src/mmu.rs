@@ -284,8 +284,4 @@ impl MMU {
             0xFFFF => &[],
         }
     }
-
-    pub(crate) fn dump_cart_sram(&self) {
-        self.cart().dump_sram();
-    }
 }

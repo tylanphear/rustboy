@@ -1,10 +1,20 @@
-#[derive(Debug)]
 pub struct Mem<const SIZE: usize>(Box<[u8; SIZE]>);
+
+impl<const SIZE: usize> std::fmt::Debug for Mem<SIZE> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Mem")
+            .field("size", &self.len())
+            .field("data...", &&self.0[..std::cmp::min(16, SIZE)])
+            .finish()
+    }
+}
+
 impl<const SIZE: usize> Default for Mem<SIZE> {
     fn default() -> Self {
         Mem(Box::new([0; SIZE]))
     }
 }
+
 impl<const SIZE: usize> Mem<SIZE> {
     #[inline]
     pub fn clear(&mut self) {

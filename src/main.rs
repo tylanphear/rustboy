@@ -196,7 +196,7 @@ fn compute_thread_(ctx: &Mutex<RunCtx>) {
     loop {
         let mut ctx = ctx.lock().unwrap();
         if ctx.exit_requested {
-            ctx.cpu.mmu.dump_cart_sram();
+            ctx.cpu.mmu.cart().dump_sram();
             break;
         }
         let (ticks_to_advance, ops_to_advance) = match ctx.run_state {

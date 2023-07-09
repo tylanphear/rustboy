@@ -5,38 +5,123 @@ use serde::{Deserialize, Serialize};
 use crate::utils::constants::{EIGHT_K, SIXTEEN_K};
 use crate::utils::mem::Mem;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Flags(u8);
+
+impl Flags {
+    pub fn is_set(&self, rhs: Flags) -> bool {
+        (self.0 & rhs.0) != 0
+    }
+}
+
+impl std::ops::BitOr for Flags {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0.bitor(rhs.0))
+    }
+}
+
+impl std::ops::BitAnd for Flags {
+    type Output = Self;
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Self(self.0.bitand(rhs.0))
+    }
+}
+
+pub mod flags {
+    use super::Flags;
+    pub const NONE: Flags = Flags(0x0);
+    pub const RAM: Flags = Flags(0x1);
+    pub const BATTERY: Flags = Flags(0x2);
+    pub const TIMER: Flags = Flags(0x4);
+}
+
+impl Default for Flags {
+    fn default() -> Self {
+        flags::NONE
+    }
+}
+
 const ROM_BANK_SIZE: usize = SIXTEEN_K;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize)]
+pub struct Simple {
+    ram: Mem<EIGHT_K>,
+}
+
+impl Simple {
+    pub fn store(&mut self, address: u16, val: u8) {
+        match address {
+            0xA000..=0xBFFF => self.ram[address - 0xA000] = val,
+            _ => {}
+        }
+    }
+
+    pub fn load(&self, address: u16, data: &[u8]) -> u8 {
+        match address {
+            0x0000..=0x7FFF => data[address as usize],
+            0xA000..=0xBFFF => self.ram[address - 0xA000],
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn block_load<'a>(
+        &'a self,
+        address: u16,
+        len: usize,
+        data: &'a [u8],
+    ) -> &'a [u8] {
+        match address {
+            0x0000..=0x7FFF => {
+                let offset = address as usize;
+                let len_to_load = std::cmp::min(data.len() - offset, len);
+                &data[offset..][..len_to_load]
+            }
+            0xA000..=0xBFFF => {
+                self.ram.safe_slice((address - 0xA000) as usize, len)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.ram.clear();
+    }
+}
+
+/// MBC1
+///
+/// Regions:
+///  * 0x0000 - 0x3FFF : ROM Bank X0    [read-only]
+///  * 0x4000 - 0x7FFF : ROM Bank 01-7F [read-only]
+///  * 0xA000 - 0xBFFF : RAM Bank 00-03 [read/write]
+///
+/// Registers:
+///  * 0x0000 - 0x1FFF : RAM Enable
+///  * 0x2000 - 0x3FFF : ROM Bank Number [5-bits]
+///  * 0x4000 - 0x5FFF : RAM Bank Number (or upper ROM) [2 bits]
+///  * 0x6000 - 0x7FFF : Banking Mode Select [1-bit]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MBC1 {
     ram_enable: bool,
     bank_mode_select: u8,
     rom_bank_lower5: u8,
     ram_or_rom_upper2: u8,
     ram_or_rom_upper2_is_rom: bool,
+    flags: Flags,
     sram: Mem<EIGHT_K>,
 }
 
-impl std::fmt::Debug for MBC1 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MBC1")
-            .field("ram_enable", &self.ram_enable)
-            .field("bank_mode_select", &self.bank_mode_select)
-            .field("rom_bank_lower5", &self.rom_bank_lower5)
-            .field("ram_or_rom_upper2", &self.ram_or_rom_upper2)
-            .field("sram (size)", &self.sram.len())
-            .finish()
-    }
-}
-
 impl MBC1 {
-    pub fn new(num_rom_banks: u8) -> Self {
+    pub fn new(num_rom_banks: u8, flags: Flags) -> Self {
         Self {
             ram_enable: false,
             bank_mode_select: 0,
             rom_bank_lower5: 0,
             ram_or_rom_upper2: 0,
             ram_or_rom_upper2_is_rom: num_rom_banks >= 64,
+            flags,
             sram: Default::default(),
         }
     }
@@ -46,6 +131,13 @@ impl MBC1 {
         self.bank_mode_select = 0;
         self.rom_bank_lower5 = 0;
         self.ram_or_rom_upper2 = 0;
+        if !self.ram_is_persistent() {
+            self.sram.clear();
+        }
+    }
+
+    pub fn ram_is_persistent(&self) -> bool {
+        self.flags.is_set(flags::BATTERY)
     }
 
     fn rom_bank_1_addr_base(&self) -> usize {
@@ -103,6 +195,7 @@ impl MBC1 {
             0x4000..=0x5FFF => self.ram_or_rom_upper2 = val & 0x3,
             // ROM/RAM Mode
             0x6000..=0x7FFF => self.bank_mode_select = val & 0x1,
+            0xA000..=0xBFFF if !self.ram_enable => {}
             0xA000..=0xBFFF => self.sram[address - 0xA000] = val,
             _ => unreachable!(
                 "Store outside of MBC range? ({val:02X} to {address:04X})"
@@ -136,13 +229,19 @@ impl MBC1 {
         }
     }
 
-    pub fn sram(&self) -> &[u8] {
-        self.sram.as_slice()
+    pub fn sram(&self) -> Option<&[u8]> {
+        if self.ram_is_persistent() {
+            Some(self.sram.as_slice())
+        } else {
+            None
+        }
     }
 
     pub fn load_sram(&mut self, bytes: &[u8]) {
-        assert_eq!(bytes.len(), self.sram.len());
-        self.sram.copy_from_slice(bytes);
+        if self.ram_is_persistent() {
+            assert_eq!(bytes.len(), self.sram.len());
+            self.sram.copy_from_slice(bytes);
+        }
     }
 }
 
@@ -154,8 +253,25 @@ impl crate::utils::Dump for MBC1 {
             "{}",
             if self.ram_enable { "RAM ON" } else { "RAM OFF" }
         )?;
-        writeln!(out, "RAM BANK 1: {:08X}", self.rom_bank_1_addr_base())?;
+        writeln!(out, "ROM BANK 1: {:08X}", self.rom_bank_1_addr_base())?;
         writeln!(out, "MODE: {}", self.bank_mode_select)?;
+        {
+            write!(out, "FLAGS: ")?;
+            let mut first = true;
+            for (name, flag) in [
+                ("RAM", flags::RAM),
+                ("BATTERY", flags::BATTERY),
+                ("TIMER", flags::TIMER),
+            ] {
+                if self.flags.is_set(flag) {
+                    if !first {
+                        write!(out, " | ")?;
+                    }
+                    first = false;
+                    write!(out, "{name}")?;
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -276,27 +392,31 @@ pub struct MBC3 {
     ram_and_rtc_enable: bool,
     rom_bank: u8,
     ram_bank: u8,
+    flags: Flags,
     rtc: RTC,
     sram: Mem<{ 4 * EIGHT_K }>,
 }
-impl Default for MBC3 {
-    fn default() -> Self {
+
+impl MBC3 {
+    pub fn new(flags: Flags) -> Self {
         Self {
             ram_and_rtc_enable: false,
             rom_bank: 1,
             ram_bank: 0,
+            flags,
             rtc: RTC::new(),
             sram: Mem::default(),
         }
     }
-}
 
-impl MBC3 {
     pub fn reset(&mut self) {
-        *self = Self {
-            sram: std::mem::take(&mut self.sram),
-            ..MBC3::default()
-        };
+        self.ram_and_rtc_enable = false;
+        self.rom_bank = 0;
+        self.ram_bank = 0;
+    }
+
+    pub fn ram_is_persistent(&self) -> bool {
+        self.flags.is_set(flags::BATTERY)
     }
 
     fn rom_bank_1_addr_base(&self) -> usize {
@@ -387,13 +507,19 @@ impl MBC3 {
         }
     }
 
-    pub fn sram(&self) -> &[u8] {
-        self.sram.as_slice()
+    pub fn sram(&self) -> Option<&[u8]> {
+        if self.ram_is_persistent() {
+            Some(self.sram.as_slice())
+        } else {
+            None
+        }
     }
 
     pub fn load_sram(&mut self, bytes: &[u8]) {
-        assert_eq!(bytes.len(), self.sram.len());
-        self.sram.copy_from_slice(bytes);
+        if self.ram_is_persistent() {
+            assert_eq!(bytes.len(), self.sram.len());
+            self.sram.copy_from_slice(bytes);
+        }
     }
 }
 
