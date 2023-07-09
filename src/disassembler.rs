@@ -69,6 +69,9 @@ impl<'a> Iterator for InstIter<'a> {
         } else {
             op_from_code(self.at(0))
         };
+        if self.position + (op.num_bytes as usize) >= self.buffer.len() {
+            return None;
+        }
         let mut bytes = [0; 3];
         for i in 0..op.num_bytes {
             bytes[i as usize] = self.at(i as usize);
