@@ -110,6 +110,23 @@ impl Regs {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct FallingEdgeDetector<const BIT: usize, N: num_traits::PrimInt> {
+    val: N,
+}
+
+impl<const BIT: usize, N: num_traits::PrimInt> FallingEdgeDetector<BIT, N> {
+    pub fn new(val: N) -> Self {
+        Self { val }
+    }
+    pub fn set_and_check(&mut self, new: N) -> bool {
+        let old_edge = bit_set(self.val, BIT);
+        self.val = new;
+        let new_edge = bit_set(self.val, BIT);
+        old_edge == true && new_edge == false
+    }
+}
+
 #[derive(Debug)]
 pub struct BoundedLog<const MAX_SIZE: usize, const DRAIN_LINES: usize> {
     buffer: String,

@@ -24,16 +24,13 @@ impl IOController {
     }
 
     pub fn tick(&mut self) -> crate::cpu::Interrupts {
+        use timer::regs::DIV;
+
         let mut interrupts = crate::cpu::Interrupts::default();
-        let old_div = self.timer.load(timer::regs::DIV);
         self.lcd.tick(&mut interrupts);
         self.timer.tick(&mut interrupts);
         self.joypad.tick(&mut interrupts);
-        let new_div = self.timer.load(timer::regs::DIV);
-        self.apu.tick(
-            crate::utils::get_bit(old_div, 4) == 1
-                && crate::utils::get_bit(new_div, 4) == 0,
-        );
+        self.apu.tick(self.timer.load(DIV));
         interrupts
     }
 
