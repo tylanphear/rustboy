@@ -568,7 +568,9 @@ impl<'a> gui::Client for GuiClient<'a> {
                 .movable(false)
                 .build(|| {
                     ui.text_wrapped(debug_log_as_str!());
-                    ui.set_scroll_here_y_with_ratio(1.0);
+                    if debug_log_was_written!() && ui.scroll_y() == ui.scroll_max_y() {
+                        ui.set_scroll_here_y_with_ratio(1.0);
+                    }
                 })
                 .unwrap();
         } else {

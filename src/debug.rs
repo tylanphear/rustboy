@@ -1,18 +1,26 @@
 pub mod log {
     use crate::utils::{constants::SIXTY_FOUR_K, BoundedLog};
     use once_cell::sync::Lazy;
-    use std::sync::RwLock;
-    pub static LOG: Lazy<RwLock<BoundedLog<SIXTY_FOUR_K, 1000>>> =
-        Lazy::new(|| RwLock::new(Default::default()));
+    use std::sync::Mutex;
+
+    #[derive(Debug, Default)]
+    pub struct DebugLog {
+        pub data: BoundedLog<SIXTY_FOUR_K, 1000>,
+        pub dirty: bool,
+    }
+
+    pub static LOG: Lazy<Mutex<DebugLog>> = Lazy::new(Mutex::default);
 
     pub fn push<S: AsRef<str>>(data: S) {
-        let mut log = LOG.write().unwrap();
-        log.push(data.as_ref());
-        log.push("\n");
+        let mut log = LOG.lock().unwrap();
+        log.data.push(data.as_ref());
+        log.data.push("\n");
+        log.dirty = true;
     }
 
     pub fn reset() {
-        LOG.write().unwrap().clear()
+        let mut log = LOG.lock().unwrap();
+        log.data.clear();
     }
 
     #[macro_export]
@@ -25,7 +33,17 @@ pub mod log {
     #[macro_export]
     macro_rules! debug_log_as_str {
         ($($args:tt)*) => {{
-            $crate::debug::log::LOG.read().unwrap().as_str()
+            $crate::debug::log::LOG.lock().unwrap().data.as_str()
+        }};
+    }
+
+    #[macro_export]
+    macro_rules! debug_log_was_written {
+        ($($args:tt)*) => {{
+            let mut log = $crate::debug::log::LOG.lock().unwrap();
+            let res = log.dirty;
+            log.dirty = false;
+            res
         }};
     }
 }
