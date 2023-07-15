@@ -122,7 +122,11 @@ impl Cartridge {
     }
 
     pub fn dump_sram(&self) {
-        let path = PathBuf::from(self.name()).with_extension("sram");
+        let name = self.name();
+        if name.is_empty() {
+            return;
+        }
+        let path = PathBuf::from(name).with_extension("sram");
         let sram = match &self.mbc {
             MBC::None(..) => None,
             MBC::MBC1(mbc) => mbc.sram(),
@@ -130,8 +134,8 @@ impl Cartridge {
             MBC::MBC5(mbc) => Some(mbc.sram()),
         };
         let Some(bytes) = sram else { return };
-        if let Err(e) = std::fs::write(path, bytes) {
-            crate::debug_log!("error writing sram: {e}");
+        if let Err(e) = std::fs::write(&path, bytes) {
+            crate::debug_log!("error writing sram to {}: {e}", path.display());
         }
     }
 
