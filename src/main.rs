@@ -103,7 +103,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             volumes: [100.0, 100.0, 100.0, 100.0, 100.0],
         })))
     };
-    std::thread::scope(|s| {
+    std::thread::scope(|s| -> Result<(), Box<dyn Error>> {
         let ctx = &*ctx;
         let gui_thread = s.spawn(move || {
             gui::main_loop(GuiClient { ctx });
@@ -129,7 +129,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         ctx.lock().exit_requested = true;
         compute_thread.join().unwrap();
         audio_thread.join().unwrap();
-    });
+
+        let debug = debug_log_as_str!().to_string();
+        if !debug.is_empty() {
+            std::fs::write("debug.log", debug)?;
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 
