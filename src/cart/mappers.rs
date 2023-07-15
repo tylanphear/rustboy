@@ -109,6 +109,7 @@ pub struct MBC1 {
     rom_bank_lower5: u8,
     ram_or_rom_upper2: u8,
     ram_or_rom_upper2_is_rom: bool,
+    num_rom_banks: u8,
     flags: Flags,
     sram: Mem<EIGHT_K>,
 }
@@ -121,6 +122,7 @@ impl MBC1 {
             rom_bank_lower5: 0,
             ram_or_rom_upper2: 0,
             ram_or_rom_upper2_is_rom: num_rom_banks >= 64,
+            num_rom_banks,
             flags,
             sram: Default::default(),
         }
@@ -140,9 +142,13 @@ impl MBC1 {
         self.flags.is_set(flags::BATTERY)
     }
 
-    fn rom_bank_1_addr_base(&self) -> usize {
+    fn rom_bank_addr_base(&self) -> usize {
         // Map bank num 0x00 to 0x01, 0x20 to 0x21, etc.
-        let rom_bank_num = if self.ram_or_rom_upper2_is_rom {
+        self.rom_bank_num() * ROM_BANK_SIZE
+    }
+
+    fn rom_bank_num(&self) -> usize {
+        let num = if self.ram_or_rom_upper2_is_rom {
             (self.rom_bank_lower5 as usize)
                 | (self.rom_bank_lower5 == 0) as usize
                 | ((self.ram_or_rom_upper2 as usize) << 5)
@@ -150,7 +156,7 @@ impl MBC1 {
             (self.rom_bank_lower5 as usize)
                 | (self.rom_bank_lower5 == 0) as usize
         };
-        rom_bank_num * ROM_BANK_SIZE
+        num % (self.num_rom_banks as usize).next_power_of_two()
     }
 
     pub fn load(&self, address: u16, data: &[u8]) -> u8 {
@@ -215,7 +221,7 @@ impl MBC1 {
             },
             0x4000..=0x7FFF => {
                 crate::utils::lo_bits_of(address as usize, 14)
-                    | self.rom_bank_1_addr_base()
+                    | self.rom_bank_addr_base()
             }
             0xA000..=0xBFFF => match self.bank_mode_select {
                 0 => crate::utils::lo_bits_of(address as usize, 13),
@@ -253,7 +259,8 @@ impl crate::utils::Dump for MBC1 {
             "{}",
             if self.ram_enable { "RAM ON" } else { "RAM OFF" }
         )?;
-        writeln!(out, "ROM BANK 1: {:08X}", self.rom_bank_1_addr_base())?;
+        writeln!(out, "ROM BANK: {:02X}", self.rom_bank_num())?;
+        writeln!(out, "ROM BANK BASE: {:08X}", self.rom_bank_addr_base())?;
         writeln!(out, "MODE: {}", self.bank_mode_select)?;
         {
             write!(out, "FLAGS: ")?;
