@@ -214,7 +214,7 @@ fn compute_thread_(ctx: &Mutex<RunCtx>) {
         let mut ticks = 0;
         let mut ops = 0;
         loop {
-            if ticks >= ticks_to_advance || ops >= ops_to_advance {
+            if ctx.cpu.stopped() || ticks >= ticks_to_advance || ops >= ops_to_advance {
                 break;
             }
             ticks += 1;

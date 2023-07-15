@@ -270,6 +270,10 @@ impl CPU {
         self.state = State::Halted;
     }
 
+    pub fn stopped(&self) -> bool {
+        self.state == State::Stopped
+    }
+
     pub fn reset(&mut self) {
         self.regs = Regs::default();
         self.mmu.reset();
