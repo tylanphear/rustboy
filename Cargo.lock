@@ -877,6 +877,7 @@ dependencies = [
  "imgui-sdl2-support",
  "num-traits",
  "once_cell",
+ "parking_lot",
  "sdl2",
  "serde",
 ]
