@@ -593,7 +593,15 @@ impl<'a> gui::Client for GuiClient<'a> {
                 .size(DISPLAY_SIZE, imgui::Condition::Always)
                 .focused(true)
                 .movable(false)
+                .mouse_inputs(false)
+                .no_decoration()
                 .build(|| {
+                    if ui.is_mouse_hovering_rect(
+                        ui.window_content_region_min(),
+                        ui.window_content_region_max(),
+                    ) {
+                        ui.set_mouse_cursor(None);
+                    }
                     ui.get_window_draw_list()
                         .add_image(
                             screen_texture_id,
