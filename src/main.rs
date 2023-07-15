@@ -78,6 +78,8 @@ struct CliArgs {
     debug: bool,
     #[arg(long)]
     load_state: Option<String>,
+    #[arg(long)]
+    speedup: Option<f32>,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -96,7 +98,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             debug: cli_args.debug,
             run_state: RunState::Running,
             exit_requested: false,
-            speedup_factor: 1.0,
+            speedup: cli_args.speedup.unwrap_or(1.0),
             last_op_address: None,
             volumes: [100.0, 100.0, 100.0, 100.0, 100.0],
         })))
@@ -169,7 +171,7 @@ struct RunCtx {
     cpu: CPU,
     debug: bool,
     run_state: RunState,
-    speedup_factor: f32,
+    speedup: f32,
     exit_requested: bool,
     last_op_address: Option<u16>,
     volumes: [f32; 5],
@@ -239,27 +241,28 @@ fn compute_thread_(ctx: &Mutex<RunCtx>) {
                 ctx.run_state = RunState::Paused
             }
             RunState::Running => {
-                let speedup_factor = ctx.speedup_factor;
+                let speedup = ctx.speedup;
                 // Explicitly drop the mutex before sleeping, so we hold the
                 // lock for as little time as possible.
                 drop(ctx);
-                let expected_tick_time =
-                    TICK_DURATION * (TICKS_TO_ADVANCE_PER_RUN_STEP as u32);
-                let actual_tick_time = last_tick_time.elapsed();
-                if expected_tick_time < actual_tick_time {
-                    crate::debug_log!(
-                        "executing ticks took {}µs longer \
-                         than it was supposed to!",
-                        (actual_tick_time - expected_tick_time).as_micros()
-                    );
-                } else {
-                    let time_to_sleep = expected_tick_time - actual_tick_time;
-                    let slowdown = if speedup_factor == 0.0 {
-                        1.0
+                if speedup > 0.0 {
+                    let expected_tick_time =
+                        TICK_DURATION * (TICKS_TO_ADVANCE_PER_RUN_STEP as u32);
+                    let actual_tick_time = last_tick_time.elapsed();
+                    if expected_tick_time < actual_tick_time {
+                        crate::debug_log!(
+                            "executing ticks took {}µs longer \
+                             than it was supposed to!",
+                            (actual_tick_time - expected_tick_time).as_micros()
+                        );
                     } else {
-                        1.0 / speedup_factor
-                    };
-                    crate::utils::spin_sleep(time_to_sleep.mul_f32(slowdown));
+                        let time_to_sleep =
+                            expected_tick_time - actual_tick_time;
+                        let slowdown = 1.0 / speedup;
+                        crate::utils::spin_sleep(
+                            time_to_sleep.mul_f32(slowdown),
+                        );
+                    }
                 }
             }
             _ => {}
@@ -459,7 +462,7 @@ impl<'a> gui::Client for GuiClient<'a> {
                         }
                     }
                     scratch.clear();
-                    ui.input_float("speedup", &mut ctx.speedup_factor).build();
+                    ui.input_float("speedup", &mut ctx.speedup).build();
                     let breaks = ctx.cpu.breakpoints.dump();
                     if !breaks.is_empty() {
                         ui.text(breaks);
