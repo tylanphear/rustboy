@@ -132,11 +132,11 @@ impl MMU {
             // | OAM    | Object Attribute Table
             0xFE00..=0xFE9F => self.io.lcd.load(address),
             // | UNUSED | Ignored/empty (mostly)
-            0xFEA0..=0xFEFF => 0,
+            0xFEA0..=0xFEFF => 0xFF,
             // | IO     | mem-mapped I/O registers
             0xFF00..=0xFF4B => self.io.load(address),
             // | UNUSED | Ignored/empty (mostly)
-            0xFF4C..=0xFF7F => 0,
+            0xFF4C..=0xFF7F => 0xFF,
             // | HRAM   | Internal CPU RAM
             0xFF80..=0xFFFE => self.hram[address - 0xFF80],
             // | IE     | Interrupt Enable register
@@ -217,7 +217,7 @@ impl MMU {
             // | OAM    | Object Attribute Table
             0xFE00..=0xFE9F => self.io.lcd.store(address, val),
             // | UNUSED | Ignored/empty (mostly)
-            0xFEA0..=0xFEFF => (),
+            0xFEA0..=0xFEFF => {}
             cpu::reg::IF => self.iflags = val | 0b11100000,
             regs::BIOS_ROM_DISABLE => if val & 0x1 != 0 {
                 self.bios_enabled = false;
@@ -230,7 +230,7 @@ impl MMU {
             // | IO     | mem-mapped I/O registers
             0xFF00..=0xFF4B => self.io.store(address, val),
             // | UNUSED | Ignored/empty (mostly)
-            0xFF4C..=0xFF7F => (),
+            0xFF4C..=0xFF7F => {}
             // | HRAM   | Internal CPU RAM
             0xFF80..=0xFFFE => self.hram[address - 0xFF80] = val,
             // | IE     | Interrupt Enable register
