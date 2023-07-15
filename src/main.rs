@@ -22,9 +22,8 @@ const TICK_DURATION: std::time::Duration = std::time::Duration::from_nanos(
     1_000_000_000 / crate::cpu::T_CLOCK_FREQUENCY,
 );
 
-const FRAMES_PER_SECOND: u64 = 60;
 const TICKS_TO_ADVANCE_PER_RUN_STEP: usize =
-    (crate::cpu::T_CLOCK_FREQUENCY / FRAMES_PER_SECOND) as usize;
+    (crate::cpu::T_CLOCK_FREQUENCY / 60) as usize;
 
 mod audio;
 pub mod cart;
@@ -568,7 +567,9 @@ impl<'a> gui::Client for GuiClient<'a> {
                 .movable(false)
                 .build(|| {
                     ui.text_wrapped(debug_log_as_str!());
-                    if debug_log_was_written!() && ui.scroll_y() == ui.scroll_max_y() {
+                    if debug_log_was_written!()
+                        && ui.scroll_y() == ui.scroll_max_y()
+                    {
                         ui.set_scroll_here_y_with_ratio(1.0);
                     }
                 })

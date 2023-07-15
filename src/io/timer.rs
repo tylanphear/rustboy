@@ -92,12 +92,7 @@ impl Timer {
 
 impl crate::utils::Dump for Timer {
     fn dump<W: std::fmt::Write>(&self, out: &mut W) -> std::fmt::Result {
-        writeln!(
-            out,
-            "DIV :  {:02X} ({:04X})",
-            self.div,
-            regs::DIV
-        )?;
+        writeln!(out, "DIV :  {:02X} ({:04X})", self.div, regs::DIV)?;
         writeln!(out, "TIMA:  {:02X} ({:04X})", self.tima, regs::TIMA)?;
         writeln!(out, "TMA :  {:02X} ({:04X})", self.tma, regs::TMA)?;
         writeln!(out, "TAC : {:03b} ({:04X})", self.tac, regs::TAC)?;
