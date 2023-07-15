@@ -22,15 +22,13 @@ pub enum Event {
 }
 
 pub struct ScreenBuffer {
-    gl_pixels: Box<[u8; 160 * 144 * 4]>,
+    gl_pixels: Box<[u8; 160 * 144]>,
 }
 
 impl ScreenBuffer {
-    const NUM_RAW_PIXELS: usize = 4;
-
     pub fn new() -> Self {
         Self {
-            gl_pixels: Box::new([0; 160 * 144 * 4]),
+            gl_pixels: Box::new([0; 160 * 144]),
         }
     }
 }
@@ -47,16 +45,12 @@ impl crate::ppu::ExternalScreenBuffer for ScreenBuffer {
             colors::BLACK => 0x00,
             _ => unreachable!(),
         };
-        /* R */ self.gl_pixels[4 * idx + 0] = luminosity;
-        /* G */ self.gl_pixels[4 * idx + 1] = luminosity;
-        /* B */ self.gl_pixels[4 * idx + 2] = luminosity;
-        /* A */ self.gl_pixels[4 * idx + 3] = 0xFF;
+        self.gl_pixels[idx] = luminosity;
     }
 
     #[inline]
     fn slice(&self, start: usize, end: usize) -> &[u8] {
-        &self.gl_pixels.as_slice()
-            [start * Self::NUM_RAW_PIXELS..end * Self::NUM_RAW_PIXELS]
+        &self.gl_pixels.as_slice()[start..end]
     }
 }
 
@@ -112,6 +106,11 @@ pub fn main_loop<C: Client>(mut client: C) {
         gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_WRAP_T, REPEAT as i32);
         gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_MAG_FILTER, NEAREST as i32);
         gl.tex_parameter_i32(TEXTURE_2D, TEXTURE_MIN_FILTER, NEAREST as i32);
+        gl.tex_parameter_i32_slice(
+            TEXTURE_2D,
+            TEXTURE_SWIZZLE_RGBA,
+            &[ONE as i32, ONE as i32, ONE as i32, RED as i32],
+        );
         gl.tex_image_2d(
             TEXTURE_2D,
             0,
@@ -119,7 +118,7 @@ pub fn main_loop<C: Client>(mut client: C) {
             160,
             144,
             0,
-            RGBA,
+            RED,
             UNSIGNED_BYTE,
             None,
         );
@@ -177,21 +176,10 @@ pub fn main_loop<C: Client>(mut client: C) {
                     update.start_scanline as i32,
                     crate::io::ppu::SCREEN_WIDTH as i32,
                     update.num_scanlines() as i32,
-                    RGBA,
+                    RED,
                     UNSIGNED_BYTE,
                     PixelUnpackData::Slice(update.section(&screen_buffer)),
                 );
-                //gl.tex_image_2d(
-                //    TEXTURE_2D,
-                //    0,
-                //    RGBA as i32,
-                //    160,
-                //    144,
-                //    0,
-                //    RGBA,
-                //    UNSIGNED_BYTE,
-                //    Some(screen_buffer.gl_pixels.as_slice()),
-                //);
                 gl.bind_texture(TEXTURE_2D, None);
             }
         }
