@@ -1,5 +1,7 @@
-use crate::utils::Mem;
+use crate::utils::Clock;
 use crate::utils::FallingEdgeDetector;
+use crate::utils::Mem;
+use crate::utils::TClock;
 use serde::{Deserialize, Serialize};
 
 // If n = sample_rate,
@@ -8,7 +10,7 @@ use serde::{Deserialize, Serialize};
 //  frequency = 1s / period
 //  period = n samples / frequency
 
-pub const MAIN_CLOCK_FREQUENCY: u64 = crate::cpu::T_CLOCK_FREQUENCY;
+pub const MAIN_CLOCK_FREQUENCY: u64 = crate::cpu::M_CLOCK_FREQUENCY;
 
 /// Gameboy audio consists of 4 channels:
 ///
@@ -126,7 +128,7 @@ impl<const LIMIT: usize> LengthUnit<LIMIT> {
         }
     }
 
-    fn tick(&mut self, clock: &Clock, unit_enabled: &mut bool) {
+    fn tick(&mut self, clock: &FrameSequencer, unit_enabled: &mut bool) {
         if clock.length_tick {
             if !self.enabled || self.count == 0 {
                 return;
@@ -154,7 +156,7 @@ impl EnvelopeUnit {
         self.increase = increase;
     }
 
-    fn tick(&mut self, clock: &Clock) {
+    fn tick(&mut self, clock: &FrameSequencer) {
         if clock.envelope_tick {
             self.clock = self.clock.wrapping_add(1);
             if self.pace == 0 {
@@ -176,7 +178,7 @@ impl EnvelopeUnit {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct FrequencyUnit {
+struct SweepUnit {
     clock: u64,
     enabled: bool,
     negate: bool,
@@ -185,7 +187,7 @@ struct FrequencyUnit {
     pace: u8,
 }
 
-impl FrequencyUnit {
+impl SweepUnit {
     fn trigger(&mut self, regs: &Registers) {
         self.pace = (regs.read(reg::NR10) >> 4) & 0b111;
         self.negate = crate::utils::bit_set(regs.read(reg::NR10), 3);
@@ -212,7 +214,7 @@ impl FrequencyUnit {
 
     fn tick(
         &mut self,
-        clock: &Clock,
+        clock: &FrameSequencer,
         channel_enabled: &mut bool,
         period: &mut u16,
     ) {
@@ -244,7 +246,10 @@ struct SquareCircuit<const SWEEP: bool> {
     duty_timer: u64,
 
     period: u16,
-    freq_unit: FrequencyUnit,
+    period_timer: u16,
+    period_clock: TClock,
+
+    sweep: SweepUnit,
 
     envelope: EnvelopeUnit,
 }
@@ -269,13 +274,14 @@ impl<const SWEEP: bool> SquareCircuit<SWEEP> {
             // weird behavior: bottom two bits are not set on trigger.
             (self.period & 0b11) | (regs.channel_period(Self::CHANNEL) & !0b11)
         };
+        self.period_timer = self.period;
         self.envelope.trigger(
             regs.channel_envelope_pace(Self::CHANNEL),
             regs.channel_envelope_volume(Self::CHANNEL),
             regs.channel_envelope_increase(Self::CHANNEL),
         );
         if SWEEP {
-            self.freq_unit.trigger(regs);
+            self.sweep.trigger(regs);
         }
         if !regs.channel_dac_enabled(Self::CHANNEL) {
             self.enabled = false;
@@ -322,12 +328,11 @@ impl<const SWEEP: bool> SquareCircuit<SWEEP> {
         }
     }
 
-    fn tick(&mut self, regs: &mut Registers, clock: &Clock) -> f32 {
+    fn tick(&mut self, regs: &mut Registers, clock: &FrameSequencer) -> f32 {
         let period = self.period as u64;
 
         if SWEEP {
-            self.freq_unit
-                .tick(clock, &mut self.enabled, &mut self.period);
+            self.sweep.tick(clock, &mut self.enabled, &mut self.period);
         }
         self.length_unit.tick(clock, &mut self.enabled);
         self.envelope.tick(clock);
@@ -337,11 +342,15 @@ impl<const SWEEP: bool> SquareCircuit<SWEEP> {
             return 0.0;
         }
 
-        let sample_period = 2048 - self.period as u64;
-        if self.duty_timer % sample_period == 0 {
-            self.duty_step += 1;
-            if self.duty_step == 8 {
-                self.duty_step = 0;
+        let (_, should_clock) = self.period_clock.tick();
+        if should_clock {
+            self.period_timer += 1;
+            if self.period_timer == 0x800 {
+                self.period_timer = self.period;
+                self.duty_step += 1;
+                if self.duty_step == 8 {
+                    self.duty_step = 0;
+                }
             }
         }
 
@@ -364,6 +373,15 @@ impl<const SWEEP: bool> crate::utils::Dump for SquareCircuit<SWEEP> {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
+pub struct PeriodDivider<const RATE: u64> {
+    counter: u64,
+    period: u16,
+    period_counter: u16,
+}
+
+const WAVE_CHANNEL_RATE: u64 = crate::cpu::M_CLOCK_FREQUENCY / 2;
+
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct WaveCircuit {
     enabled: bool,
     dac: DAC,
@@ -373,7 +391,11 @@ pub struct WaveCircuit {
 
     length_unit: LengthUnit<256>,
     volume_code: u8,
+
     period: u16,
+    period_timer: u16,
+    period_clock: Clock<{WAVE_CHANNEL_RATE}>,
+
     pattern: [u8; CHANNEL_3_TABLE_SIZE],
 }
 
@@ -382,6 +404,7 @@ impl WaveCircuit {
         self.enabled = true;
         self.sample_index = 0;
         self.period = regs.channel_period(3);
+        self.period_timer = self.period;
         self.length_unit.trigger();
         if !regs.channel_dac_enabled(3) {
             self.enabled = false;
@@ -424,7 +447,7 @@ impl WaveCircuit {
         }
     }
 
-    fn tick(&mut self, regs: &Registers, clock: &Clock) -> f32 {
+    fn tick(&mut self, regs: &Registers, clock: &FrameSequencer) -> f32 {
         let period = self.period as usize;
         if period == 0 {
             return 0.0;
@@ -433,22 +456,24 @@ impl WaveCircuit {
         // Waveform is emitted from buffer
         let waveform = self.sample_buffer;
 
-        let sample_period = 2048 - (self.period as u64);
-        if clock.cycles % sample_period == 0 {
-            self.sample_index += 1;
-            if self.sample_index == 32 {
-                self.sample_index = 0;
+        let (_, should_tick) = self.period_clock.tick();
+        if should_tick {
+            self.period_timer += 1;
+            if self.period_timer == 0x800 {
+                self.period_timer = self.period;
+                // Update buffer for new nibble
+                self.sample_index += 1;
+                if self.sample_index == 32 {
+                    self.sample_index = 0;
+                }
+                let sample_num = (self.sample_index / 2) as usize;
+                let sample_nibble = (self.sample_index % 2) as usize;
+                self.sample_buffer = match sample_nibble {
+                    0 => self.pattern[sample_num] >> 4,
+                    1 => self.pattern[sample_num] & 0xF,
+                    _ => unreachable!(),
+                };
             }
-
-            // Update buffer for new nibble
-            let sample_num = (self.sample_index / 2) as usize;
-            let sample_nibble = (self.sample_index % 2) as usize;
-            let next_sample = match sample_nibble {
-                0 => self.pattern[sample_num] & 0xF,
-                1 => self.pattern[sample_num] >> 4,
-                _ => unreachable!(),
-            };
-            self.sample_buffer = next_sample;
         }
 
         let attenuation_shift = match self.volume_code & 0b11 {
@@ -527,12 +552,12 @@ impl NoiseCircuit {
         }
     }
 
-    fn tick(&mut self, regs: &Registers, clock: &Clock) -> f32 {
-        // LFSR frequency is (M / 4) / (R * 2^S) where
+    fn tick(&mut self, regs: &Registers, clock: &FrameSequencer) -> f32 {
+        // LFSR frequency is (M / 16) / (R * 2^S) where
         //    M = main clock frequency
         //    R = divider code (where 0 => 1/2)
         //    S = clock shift
-        const BASE_FREQUENCY: u64 = MAIN_CLOCK_FREQUENCY / 4;
+        const BASE_FREQUENCY: u64 = MAIN_CLOCK_FREQUENCY / 16;
         let frequency = match self.divider_code & 0b111 {
             0 => 2 * BASE_FREQUENCY / (1 << self.shift),
             r => BASE_FREQUENCY / ((1 << self.shift) * (r as u64)),
@@ -647,7 +672,7 @@ struct HighPassFilter {
     capacitor: f32,
 }
 const CHARGE_FACTOR: f32 = {
-    0.999832 // == 0.999958.powi(4)
+    0.999958
 };
 
 impl HighPassFilter {
@@ -666,7 +691,7 @@ impl HighPassFilter {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct Clock {
+struct FrameSequencer {
     cycles: u64,
     div_apu_counter: u64,
 
@@ -677,7 +702,7 @@ struct Clock {
     div_edge_detector: FallingEdgeDetector</*BIT=*/ 4, u8>,
 }
 
-impl Clock {
+impl FrameSequencer {
     fn tick(&mut self, new_div: u8) {
         self.cycles = self.cycles.wrapping_add(1);
         self.length_tick = false;
@@ -704,7 +729,7 @@ impl Clock {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct APU {
-    clock: Clock,
+    sequencer: FrameSequencer,
     buffer: Vec<f32>,
 
     num_channels: usize,
@@ -726,7 +751,7 @@ pub struct APU {
 
 impl APU {
     pub fn reset(&mut self) {
-        self.clock = Clock::default();
+        self.sequencer = FrameSequencer::default();
         self.buffer.fill(0.0);
         self.regs.clear();
         self.sample_num = 0;
@@ -746,7 +771,7 @@ impl APU {
 
     pub fn tick(&mut self, new_div: u8) {
         if self.sample_rate == 0 {
-            self.clock.tick(new_div);
+            self.sequencer.tick(new_div);
             return;
         }
 
@@ -767,13 +792,13 @@ impl APU {
         };
 
         let (channel_1_left, channel_1_right) =
-            panned(4, 0, self.channel1.tick(&mut self.regs, &self.clock));
+            panned(4, 0, self.channel1.tick(&mut self.regs, &self.sequencer));
         let (channel_2_left, channel_2_right) =
-            panned(5, 1, self.channel2.tick(&mut self.regs, &self.clock));
+            panned(5, 1, self.channel2.tick(&mut self.regs, &self.sequencer));
         let (channel_3_left, channel_3_right) =
-            panned(6, 2, self.channel3.tick(&self.regs, &self.clock));
+            panned(6, 2, self.channel3.tick(&self.regs, &self.sequencer));
         let (channel_4_left, channel_4_right) =
-            panned(7, 3, self.channel4.tick(&self.regs, &self.clock));
+            panned(7, 3, self.channel4.tick(&self.regs, &self.sequencer));
 
         self.regs.modify(reg::NR52, |reg| {
             reg & !(0b1111)
@@ -783,11 +808,11 @@ impl APU {
                 | ((self.channel1.enabled as u8) << 0)
         });
 
-        self.clock.tick(new_div);
+        self.sequencer.tick(new_div);
 
         // Check if compute cycles % sample_period == 0, i.e. if we should emit
         // a sample this tick (relies on sample_period being a power of 2).
-        if self.clock.cycles & (self.sample_period - 1) != 0 {
+        if self.sequencer.cycles & (self.sample_period - 1) != 0 {
             return;
         }
 
@@ -815,7 +840,7 @@ impl APU {
                 + ch3 * ext_vol_percent(3)
                 + ch4 * ext_vol_percent(4))
                 / 4.0;
-            let amplification_factor = (volume as f32 + 1.0) / 16.0;
+            let amplification_factor = (volume as f32 + 1.0) / 8.0;
             channels * amplification_factor * ext_vol_percent(0)
         };
         let dacs_enabled = self.regs.channel_dac_enabled(1)
@@ -1039,7 +1064,7 @@ mod tests {
         const TICKS_FOR_512_HZ: u64 = crate::cpu::T_CLOCK_FREQUENCY / 512;
 
         let mut timer = crate::io::Timer::default();
-        let mut clock = Clock::default();
+        let mut clock = FrameSequencer::default();
         for n in 0..100 {
             for tick in 0..TICKS_FOR_512_HZ {
                 assert_eq!(clock.div_apu_counter, n);

@@ -19,11 +19,11 @@ use parking_lot::Mutex;
 use std::{error::Error, ops::ControlFlow};
 
 const TICK_DURATION: std::time::Duration = std::time::Duration::from_nanos(
-    1_000_000_000 / crate::cpu::T_CLOCK_FREQUENCY,
+    1_000_000_000 / crate::cpu::M_CLOCK_FREQUENCY,
 );
 
 const TICKS_TO_ADVANCE_PER_RUN_STEP: usize =
-    (crate::cpu::T_CLOCK_FREQUENCY / 60) as usize;
+    (crate::cpu::M_CLOCK_FREQUENCY / 60) as usize;
 
 mod audio;
 pub mod cart;

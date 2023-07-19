@@ -2,8 +2,8 @@ use std::cell::Cell;
 
 use serde::{Deserialize, Serialize};
 
-use crate::utils;
 use crate::utils::Mem;
+use crate::utils::{self, TClock};
 
 // LCD display is 160x144 pixels
 pub const SCREEN_WIDTH: usize = 160;
@@ -169,7 +169,7 @@ impl RenderUpdate {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct LCDController {
     screen: ScreenBuffer,
-    clock: u64,
+    clock: TClock,
     registers: [u8; 0xFF4C - 0xFF40],
     pub(crate) vram: Vram,
     pub(crate) oam: Oam,
@@ -179,7 +179,7 @@ pub struct LCDController {
 
 impl LCDController {
     pub fn reset(&mut self) {
-        self.clock = 0;
+        self.clock.reset();
         self.registers = Default::default();
         self.vram.clear();
         self.oam.clear();
@@ -217,10 +217,16 @@ impl LCDController {
         let stat_interrupt_on_mode0 =
             utils::bit_set(self.read_reg(reg::STAT), 3);
 
+        let (mut clock, should_tick) = self.clock.tick();
+        if !should_tick {
+            return;
+        }
+        clock = clock % (CLOCKS_PER_SCANLINE * NUM_SCANLINES);
+
         // Check our current scanline and set mode accordingly.
         let ly = self.read_reg(reg::LY);
-        let line = self.clock / CLOCKS_PER_SCANLINE;
-        let clock = self.clock % CLOCKS_PER_SCANLINE;
+        let line = clock / CLOCKS_PER_SCANLINE;
+        let clock = clock % CLOCKS_PER_SCANLINE;
         match line {
             // Not in VBlank
             0..=143 => match clock {
@@ -268,11 +274,6 @@ impl LCDController {
                 || (self.mode() as u8 == 2 && stat_interrupt_on_mode2);
         if !old_stat_signal && self.stat_signal {
             interrupts.request_lcd_stat();
-        }
-
-        self.clock += 1;
-        if self.clock == CLOCKS_PER_SCANLINE * NUM_SCANLINES {
-            self.clock = 0;
         }
     }
 
@@ -778,9 +779,23 @@ fn pixel_color_num_in_tile(tile: &[u8], pixel: usize) -> u8 {
 
 impl crate::utils::Dump for LCDController {
     fn dump<W: std::fmt::Write>(&self, out: &mut W) -> std::fmt::Result {
-        writeln!(out, "CLOCK0: {0:08}", self.clock)?;
-        writeln!(out, "CLOCK1: {0:08}", self.clock % CLOCKS_PER_SCANLINE)?;
-        writeln!(out, "LINE  : {0:08}", self.clock / CLOCKS_PER_SCANLINE)?;
+        writeln!(
+            out,
+            "CLOCK0: {0:08}",
+            self.clock.val() % (CLOCKS_PER_SCANLINE * NUM_SCANLINES)
+        )?;
+        writeln!(
+            out,
+            "CLOCK1: {0:08}",
+            self.clock.val() % (CLOCKS_PER_SCANLINE * NUM_SCANLINES)
+                % CLOCKS_PER_SCANLINE
+        )?;
+        writeln!(
+            out,
+            "LINE  : {0:08}",
+            self.clock.val() % (CLOCKS_PER_SCANLINE * NUM_SCANLINES)
+                / CLOCKS_PER_SCANLINE
+        )?;
         writeln!(
             out,
             "LCDC: {0:08b} ({1:04X})",
@@ -939,15 +954,20 @@ mod tests {
         // Simulate 144 lines before VBlank
         let mut interrupts = crate::cpu::Interrupts::default();
         for _ in 0..144 {
-            for _ in 0..CLOCKS_PER_SCANLINE {
+            for _ in 0..(CLOCKS_PER_SCANLINE * 4) {
                 ppu.tick(&mut interrupts);
+                assert!(!interrupts.vblank_requested());
             }
         }
         // Should be right before VBlank, but not quite there yet
         assert!(!interrupts.vblank_requested());
         assert_eq!(ppu.mode(), Mode::HBlank);
-        ppu.tick(&mut interrupts);
-        ppu.tick(&mut interrupts);
+        for _ in 0..4 {
+            ppu.tick(&mut interrupts);
+        }
+        for _ in 0..4 {
+            ppu.tick(&mut interrupts);
+        }
         assert_eq!(ppu.mode(), Mode::VBlank);
         assert!(interrupts.vblank_requested());
     }

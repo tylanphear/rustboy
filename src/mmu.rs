@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cart::Cartridge;
 use crate::io::IOController;
-use crate::utils::Mem;
+use crate::utils::{Mem, TClock};
 use crate::{cpu, io::ppu};
 
 mod regs {
@@ -41,6 +41,7 @@ pub struct MMU {
     bios_enabled: bool,
     pub(crate) cartridge: Option<Cartridge>,
 
+    oam_timer: TClock,
     oam_base_addr: u16,
     oam_clocks_left: u16,
 
@@ -60,6 +61,7 @@ impl MMU {
             bios_enabled: true,
             iflags: 0b11100000,
             ie: 0,
+            oam_timer: Default::default(),
             oam_base_addr: 0,
             oam_clocks_left: 0,
             watchpoints: Default::default(),
@@ -96,7 +98,8 @@ impl MMU {
     }
 
     pub fn tick(&mut self) {
-        if self.oam_clocks_left == 0 {
+        let (_, should_tick) = self.oam_timer.tick();
+        if self.oam_clocks_left == 0 || !should_tick {
             return;
         }
 

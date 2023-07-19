@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::utils::MClock;
+
 pub mod regs {
     pub const DIV: u16 = 0xFF04;
     pub const TIMA: u16 = 0xFF05;
@@ -13,7 +15,7 @@ pub const DIV_CLOCK_PERIOD: u64 =
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Timer {
-    clock: u16,
+    clock: MClock,
     div: u8,
     tima: u8,
     tma: u8,
@@ -26,14 +28,17 @@ impl Timer {
     }
 
     pub fn tick(&mut self, interrupts: &mut crate::cpu::Interrupts) {
-        self.clock = self.clock.wrapping_add(4);
+        let (clock, should_tick) = self.clock.tick();
+        if !should_tick {
+            return;
+        }
 
         // The main clock ticks at 4Mhz. This means a tick occurs every
         // 1/2^22 seconds. The DIV clock is expected to tick every 16384 Hz.
         // This means a tick every 1/16384 seconds. This means we need to tick one
         // DIV clock every 2^22/16384 == 64 main clock ticks.
 
-        if (self.clock as u64) % DIV_CLOCK_PERIOD == 0 {
+        if clock % DIV_CLOCK_PERIOD == 0 {
             self.div = self.div.wrapping_add(1);
         }
 
@@ -41,7 +46,7 @@ impl Timer {
             return;
         }
 
-        if self.clock % self.clock_rate() == 0 {
+        if clock % self.clock_rate() == 0 {
             let (new_tima, overflowed) = self.tima.overflowing_add(1);
             if overflowed {
                 interrupts.request_timer();
@@ -79,7 +84,7 @@ impl Timer {
         self.tac & 0x1 != 0
     }
 
-    fn clock_rate(&self) -> u16 {
+    fn clock_rate(&self) -> u64 {
         match self.tac & 0b11 {
             0b00 => 1024, // clocks   4096 Hz
             0b01 => 16,   // clocks 262144 Hz
@@ -100,7 +105,7 @@ impl crate::utils::Dump for Timer {
         writeln!(
             out,
             "CLOCK: {:04X} (rate: {})",
-            self.clock,
+            self.clock.val(),
             self.clock_rate()
         )?;
         Ok(())

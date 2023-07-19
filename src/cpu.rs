@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use crate::mmu::MMU;
 use crate::opcodes::{self, Op, OpStatus};
-use crate::utils::Regs;
+use crate::utils::{Regs, TClock};
 
 /// M clock (mem/io) clock runs at 4Mhz
 pub const M_CLOCK_FREQUENCY: u64 = 4_194_304;
@@ -133,6 +133,7 @@ impl Breakpoints {
 
 #[derive(Serialize, Deserialize)]
 pub struct CPU {
+    clock: TClock,
     pub regs: Regs,
     pub mmu: MMU,
     ime: bool, // Interrupt Master Enable
@@ -148,6 +149,7 @@ pub struct CPU {
 impl CPU {
     pub fn new() -> CPU {
         CPU {
+            clock: Default::default(),
             regs: Regs::default(),
             mmu: MMU::new(),
             ime: false,
@@ -176,6 +178,11 @@ impl CPU {
         // be flagged in IF. Do this *before* we possibly dispatch an interrupt
         // this tick.
         self.tick_devices_and_check_interrupts();
+
+        let (_, should_tick) = self.clock.tick();
+        if !should_tick {
+            return this_tick;
+        }
 
         // Check if we're halted. If so, and there is an interrupt requested,
         // un-halt and continue execution.
