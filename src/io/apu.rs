@@ -381,7 +381,6 @@ impl WaveCircuit {
     fn trigger(&mut self, regs: &Registers) {
         self.enabled = true;
         self.sample_index = 0;
-        self.pattern = *regs.channel_3_wave_table();
         self.period = regs.channel_period(3);
         self.length_unit.trigger();
         if !regs.channel_dac_enabled(3) {
