@@ -12,7 +12,7 @@ pub mod header {
     pub const LOGO_END: usize = 0x0133;
     pub const TITLE_START: usize = 0x0134;
     pub const TITLE_END: usize = 0x0143;
-    pub const CGDB_FLAG: usize = 0x0143;
+    pub const CGB_FLAG: usize = 0x0143;
     pub const CART_TYPE: usize = 0x0147;
     pub const ROM_SIZE: usize = 0x0148;
     pub const RAM_SIZE: usize = 0x0149;
@@ -31,7 +31,7 @@ impl Cartridge {
             data.len() >= THIRTY_TWO_K,
             "cart must be at least 32K bytes long"
         );
-        if data[CGDB_FLAG] == 0xC0 {
+        if data[CGB_FLAG] == 0xC0 {
             panic!("No support for CGB-only carts!");
         }
         use flags::*;
