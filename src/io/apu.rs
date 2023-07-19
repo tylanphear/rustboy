@@ -646,24 +646,21 @@ impl Registers {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct HighPassFilter {
     capacitor: f32,
-    charge_factor: f32,
 }
+const CHARGE_FACTOR: f32 = {
+    0.999832 // == 0.999958.powi(4)
+};
 
 impl HighPassFilter {
     fn reset(&mut self) {
         self.capacitor = 0.0;
     }
 
-    fn set_charge_factor_from_output_sample_rate(&mut self, rate: usize) {
-        self.charge_factor = 0.999958f32
-            .powi((crate::cpu::M_CLOCK_FREQUENCY / (rate as u64)) as i32);
-    }
-
     fn filter(&mut self, dacs_enabled: bool, input: f32) -> f32 {
         let mut output = 0.0;
         if dacs_enabled {
             output = input - self.capacitor;
-            self.capacitor = input - output * self.charge_factor;
+            self.capacitor = input - output * CHARGE_FACTOR;
         }
         output
     }
@@ -879,10 +876,6 @@ impl APU {
         self.sample_rate = sample_rate as u64;
         self.sample_period = MAIN_CLOCK_FREQUENCY / self.sample_rate;
         assert!(self.sample_period.is_power_of_two());
-        self.high_pass_left
-            .set_charge_factor_from_output_sample_rate(sample_rate);
-        self.high_pass_right
-            .set_charge_factor_from_output_sample_rate(sample_rate);
     }
 
     pub fn load(&self, address: u16) -> u8 {
