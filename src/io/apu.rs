@@ -71,6 +71,7 @@ pub mod reg {
 }
 
 pub const CHANNEL_3_TABLE_START: u16 = 0xFF30;
+pub const CHANNEL_3_TABLE_LAST: u16 = 0xFF3F;
 pub const CHANNEL_3_TABLE_END: u16 = 0xFF40;
 pub const CHANNEL_3_TABLE_SIZE: usize =
     (CHANNEL_3_TABLE_END - CHANNEL_3_TABLE_START) as usize;
@@ -96,11 +97,15 @@ impl DAC {
         }
         if enabled {
             // TODO: smooth transition old output to new input?
-            self.output = 1.0 - 2.0 * (input as f32) * (1.0 / 15.0);
+            self.output = Self::digital_to_analog(input);
         } else {
             self.output /= FALLOFF_FACTOR;
         }
         self.output
+    }
+
+    fn digital_to_analog(input: u8) -> f32 {
+        1.0 - 2.0 * (input as f32) * (1.0 / 15.0)
     }
 }
 
@@ -277,6 +282,46 @@ impl<const SWEEP: bool> SquareCircuit<SWEEP> {
         }
     }
 
+    fn write(&mut self, regs: &Registers, address: u16, val: u8) {
+        match address {
+            reg::NR10 => {
+                let negate = crate::utils::bit_set(val, 3);
+                if !negate && self.sweep.negate {
+                    self.enabled = false;
+                }
+                self.sweep.shift = val & 0b111;
+            }
+            reg::NR11 | reg::NR21 => {
+                self.duty_cycle = val >> 6;
+                self.length_unit.set_count(val & 0b0011_1111);
+            }
+            reg::NR12 | reg::NR22 => {
+                if self.enabled {
+                    /* writes observed on channel trigger */
+                } else {
+                    self.envelope.pace =
+                        regs.channel_envelope_pace(Self::CHANNEL);
+                    self.envelope.volume =
+                        regs.channel_envelope_volume(Self::CHANNEL);
+                    self.envelope.increase =
+                        regs.channel_envelope_increase(Self::CHANNEL);
+                }
+            }
+            reg::NR13 | reg::NR23 => {
+                self.period = regs.channel_period(Self::CHANNEL);
+            }
+            reg::NR14 | reg::NR24 => {
+                self.length_unit.enabled = crate::utils::bit_set(val, 6);
+                self.period = regs.channel_period(Self::CHANNEL);
+                let trigger = crate::utils::bit_set(val, 7);
+                if trigger {
+                    self.trigger(regs);
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
     fn tick(&mut self, regs: &mut Registers, clock: &Clock) -> f32 {
         let period = self.period as u64;
 
@@ -341,6 +386,42 @@ impl WaveCircuit {
         self.length_unit.trigger();
         if !regs.channel_dac_enabled(3) {
             self.enabled = false;
+        }
+    }
+
+    fn write(&mut self, regs: &Registers, address: u16, val: u8) {
+        match address {
+            reg::NR30 => {
+                if !regs.channel_dac_enabled(3) {
+                    self.enabled = false;
+                }
+            }
+            reg::NR31 => {
+                self.length_unit.set_count(val);
+            }
+            reg::NR32 => {
+                self.volume_code = (val >> 4) & 0b11;
+            }
+            reg::NR33 => {
+                self.period = regs.channel_period(3);
+            }
+            reg::NR34 => {
+                self.length_unit.enabled = crate::utils::bit_set(val, 6);
+                self.period = regs.channel_period(3);
+                let trigger = crate::utils::bit_set(val, 7);
+                if trigger && regs.channel_dac_enabled(3) {
+                    self.trigger(regs);
+                }
+            }
+            CHANNEL_3_TABLE_START..=CHANNEL_3_TABLE_LAST => {
+                if self.enabled {
+                    // TODO: implement weird behavior
+                } else {
+                    self.pattern[(address - CHANNEL_3_TABLE_START) as usize] =
+                        val;
+                }
+            }
+            _ => unreachable!(),
         }
     }
 
@@ -830,94 +911,37 @@ impl APU {
     }
 
     pub fn store(&mut self, address: u16, val: u8) {
-        if !self.is_powered_on() {
-            match address {
-                // can still write to APU power length counters
-                reg::NR52 => {}
-                _ => {
-                    crate::debug_log!(
-                        "apu: (ignored) {address:04X} <- {val:08b}"
-                    );
-                    return;
-                }
-            }
-        }
-        crate::debug_log!("apu: {address:04X} <- {val:08b}");
         match address {
             // Only top bit is writeable
             reg::NR52 => {
-                let power = crate::utils::get_bit(val, 7);
-                if power == 0 {
-                    for reg in REGS_START..REGS_END {
-                        if reg != reg::NR52 {
-                            self.store(reg as u16, 0);
-                        }
-                    }
-                    self.channel1.enabled = false;
-                    self.channel2.enabled = false;
-                    self.channel3.enabled = false;
-                    self.channel4.enabled = false;
+                let power = crate::utils::bit_set(val, 7);
+                if power {
+                    self.power_on();
+                } else {
+                    self.power_off();
                 }
-                self.regs.modify(address, |reg| {
-                    crate::utils::set_bit(reg, 7, power)
-                });
             }
-            _ => self.regs.write(address, val),
+            _ if !self.is_powered_on() => {
+                crate::debug_log!("apu: (ignored) {address:04X} <- {val:08b}");
+            }
+            _ => {
+                self.regs.write(address, val);
+                crate::debug_log!("apu: {address:04X} <- {val:08b}");
+            }
         };
         match address {
-            reg::NR11 => {
-                self.channel1.duty_cycle = val >> 6;
-                self.channel1.length_unit.set_count(val & 0b0011_1111);
+            reg::NR10 | reg::NR11 | reg::NR12 | reg::NR13 | reg::NR14 => {
+                self.channel1.write(&self.regs, address, val);
             }
-            reg::NR21 => {
-                self.channel2.duty_cycle = val >> 6;
-                self.channel2.length_unit.set_count(val & 0b0011_1111);
+            reg::NR21 | reg::NR22 | reg::NR23 | reg::NR24 => {
+                self.channel2.write(&self.regs, address, val);
             }
-            reg::NR12 => { /* writes observed on channel trigger */ }
-            reg::NR22 => { /* writes observed on channel trigger */ }
-            reg::NR14 => {
-                self.channel1.length_unit.enabled =
-                    crate::utils::bit_set(val, 6);
-                let trigger = crate::utils::bit_set(val, 7);
-                if trigger {
-                    self.channel1.trigger(&self.regs);
-                }
-            }
-            reg::NR24 => {
-                self.channel2.length_unit.enabled =
-                    crate::utils::bit_set(val, 6);
-                let trigger = crate::utils::bit_set(val, 7);
-                if trigger {
-                    self.channel2.trigger(&self.regs);
-                }
-            }
-            reg::NR13 => {
-                self.channel1.period = self.regs.channel_period(1);
-            }
-            reg::NR23 => {
-                self.channel2.period = self.regs.channel_period(2);
-            }
-            reg::NR33 => {
-                self.channel3.period = self.regs.channel_period(3);
-            }
-            reg::NR30 => {
-                if !self.regs.channel_dac_enabled(3) {
-                    self.channel3.enabled = false;
-                }
-            }
-            reg::NR31 => {
-                self.channel3.length_unit.set_count(val);
-            }
-            reg::NR32 => {
-                self.channel3.volume_code = (val >> 4) & 0b11;
-            }
-            reg::NR34 => {
-                self.channel3.length_unit.enabled =
-                    crate::utils::bit_set(val, 6);
-                let trigger = crate::utils::bit_set(val, 7);
-                if trigger && self.regs.channel_dac_enabled(3) {
-                    self.channel3.trigger(&self.regs);
-                }
+            reg::NR30
+            | reg::NR31
+            | reg::NR32
+            | reg::NR34
+            | CHANNEL_3_TABLE_START..=CHANNEL_3_TABLE_LAST => {
+                self.channel3.write(&self.regs, address, val);
             }
             reg::NR41 => {
                 self.channel4.length_unit.set_count(val & 0b0011_1111);
@@ -938,6 +962,31 @@ impl APU {
             }
             _ => {}
         }
+    }
+
+    fn power_on(&mut self) {
+        crate::debug_log!("apu: power on");
+        self.regs
+            .modify(reg::NR52, |reg| crate::utils::set_bit(reg, 7, 1));
+        self.sequencer.div_apu_counter = 0;
+        self.channel1.duty_step = 0;
+        self.channel2.duty_step = 0;
+        self.channel3.pattern.fill(0);
+    }
+
+    fn power_off(&mut self) {
+        crate::debug_log!("apu: power off");
+        for reg in REGS_START..REGS_END {
+            if reg != reg::NR52 {
+                self.store(reg as u16, 0);
+            }
+        }
+        self.channel1.enabled = false;
+        self.channel2.enabled = false;
+        self.channel3.enabled = false;
+        self.channel4.enabled = false;
+        self.regs
+            .modify(reg::NR52, |reg| crate::utils::set_bit(reg, 7, 0));
     }
 
     pub fn render(&mut self, data: &mut [f32], external_volumes: &[f32; 5]) {
