@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cart::Cartridge;
 use crate::io::IOController;
-use crate::utils::mem::Mem;
+use crate::utils::Mem;
 use crate::{cpu, io::ppu};
 
 mod regs {

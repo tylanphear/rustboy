@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-pub mod mem;
+mod mem;
+
+pub use mem::Mem;
 
 pub mod constants {
     pub const EIGHT_K: usize = 0x2000;

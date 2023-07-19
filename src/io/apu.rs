@@ -1,4 +1,4 @@
-use crate::utils::mem::Mem;
+use crate::utils::Mem;
 use crate::utils::FallingEdgeDetector;
 use serde::{Deserialize, Serialize};
 

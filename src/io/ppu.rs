@@ -3,7 +3,7 @@ use std::cell::Cell;
 use serde::{Deserialize, Serialize};
 
 use crate::utils;
-use crate::utils::mem::Mem;
+use crate::utils::Mem;
 
 // LCD display is 160x144 pixels
 pub const SCREEN_WIDTH: usize = 160;

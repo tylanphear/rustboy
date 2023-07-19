@@ -3,7 +3,7 @@ use std::cell::Cell;
 use serde::{Deserialize, Serialize};
 
 use crate::utils::constants::{EIGHT_K, SIXTEEN_K};
-use crate::utils::mem::Mem;
+use crate::utils::Mem;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(transparent)]
