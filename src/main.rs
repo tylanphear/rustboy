@@ -100,7 +100,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             exit_requested: false,
             speedup: cli_args.speedup.unwrap_or(1.0),
             last_op_address: None,
-            volumes: [100.0, 100.0, 100.0, 100.0, 100.0],
+            volumes: [80.0, 100.0, 100.0, 100.0, 100.0],
         })))
     };
     std::thread::scope(|s| -> Result<(), Box<dyn Error>> {
@@ -221,7 +221,10 @@ fn compute_thread_(ctx: &Mutex<RunCtx>) {
         let mut ticks = 0;
         let mut ops = 0;
         loop {
-            if ctx.cpu.stopped() || ticks >= ticks_to_advance || ops >= ops_to_advance {
+            if ctx.cpu.stopped()
+                || ticks >= ticks_to_advance
+                || ops >= ops_to_advance
+            {
                 break;
             }
             ticks += 1;
@@ -616,12 +619,13 @@ impl<'a> gui::Client for GuiClient<'a> {
                         )
                         .build();
                 });
+            const VOLUME_POS: [f32; 2] =
+                [DISPLAY_POS[X] + DISPLAY_SIZE[X], DISPLAY_POS[Y]];
+            const VOLUME_SIZE: [f32; 2] = [150.0, 100.0];
             ui.window("volume")
-                .position(
-                    [DISPLAY_POS[X] + DISPLAY_SIZE[X], DISPLAY_POS[Y]],
-                    imgui::Condition::FirstUseEver,
-                )
-                .size([150.0, 100.0], imgui::Condition::Always)
+                .collapsible(false)
+                .position(VOLUME_POS, imgui::Condition::FirstUseEver)
+                .size(VOLUME_SIZE, imgui::Condition::Always)
                 .build(|| {
                     ui.slider("vol", 0.0, 100.0, &mut ctx.volumes[0]);
                 })
