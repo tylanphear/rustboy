@@ -26,16 +26,16 @@ const TICKS_TO_ADVANCE_PER_RUN_STEP: usize =
     (crate::cpu::M_CLOCK_FREQUENCY / 60) as usize;
 
 mod audio;
-pub mod cart;
-pub mod cpu;
-pub mod debug;
-pub mod disassembler;
+mod cart;
+mod cpu;
+mod debug;
+mod disassembler;
 mod gui;
-pub mod io;
-pub mod mmu;
-pub mod opcodes;
+mod io;
+mod mmu;
+mod opcodes;
 mod save_states;
-pub mod utils;
+mod utils;
 
 use cpu::{Tick, CPU};
 use io::ppu;
