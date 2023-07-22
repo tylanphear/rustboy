@@ -13,6 +13,32 @@ pub mod constants {
     pub const SIXTY_FOUR_K: usize = 0x10000;
 }
 
+pub(crate) fn partial_min<T: PartialOrd>(a: T, b: T) -> T {
+    match a.partial_cmp(&b) {
+        Some(ordering) => {
+            if ordering.is_lt() {
+                a
+            } else {
+                b
+            }
+        }
+        None => a,
+    }
+}
+
+pub(crate) fn partial_max<T: PartialOrd>(a: T, b: T) -> T {
+    match a.partial_cmp(&b) {
+        Some(ordering) => {
+            if ordering.is_gt() {
+                a
+            } else {
+                b
+            }
+        }
+        None => a,
+    }
+}
+
 #[inline]
 pub(crate) fn get_bit<N>(byte: N, idx: usize) -> N
 where

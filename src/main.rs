@@ -362,6 +362,13 @@ impl<'a> gui::Client for GuiClient<'a> {
                 ctx.cpu.mmu.io.joypad.down(joypad::START);
                 ctx.cpu.mmu.io.joypad.down(joypad::SELECT);
             }
+            E::KeyDown(K::Equals) => {
+                ctx.volumes[0] =
+                    utils::partial_min(100.0, ctx.volumes[0] + 10.0);
+            }
+            E::KeyDown(K::Minus) => {
+                ctx.volumes[0] = utils::partial_max(0.0, ctx.volumes[0] - 10.0);
+            }
             E::KeyUp(key) => {
                 if let Some(code) = sdl_key_to_joypad_code(&key) {
                     ctx.cpu.mmu.io.joypad.up(code);
