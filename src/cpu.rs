@@ -209,11 +209,12 @@ impl CPU {
         // Pipeline stage 0: handle executing or retiring ops.
         match self.state {
             State::ExecutingOp(ref mut cycles) => {
-                *cycles -= CYCLES_PER_TICK;
-                if *cycles == 0 {
+                if *cycles == CYCLES_PER_TICK {
                     // Execute the instruction and check for extra cycles (in
                     // the case of branches).
                     self.execute_one_op(self.current_op.unwrap());
+                } else {
+                    *cycles -= CYCLES_PER_TICK;
                 }
             }
             State::RetiringOp(ref mut cycles) => {
