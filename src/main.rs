@@ -34,6 +34,7 @@ mod gui;
 pub mod io;
 pub mod mmu;
 pub mod opcodes;
+mod save_states;
 pub mod utils;
 
 use cpu::{Tick, CPU};
@@ -42,33 +43,21 @@ use io::ppu;
 use clap::Parser;
 
 fn save_state_with_name(name: &str, cpu: &CPU) {
-    let path = std::path::PathBuf::from(name).with_extension("state");
-    save_state_from_path(path.to_str().unwrap(), cpu);
-}
-
-fn save_state_from_path(path: &str, cpu: &CPU) {
-    let mut encoder = flate2::write::GzEncoder::new(
-        Vec::new(),
-        flate2::Compression::default(),
-    );
-    ciborium::into_writer(cpu, &mut encoder).unwrap();
-    let encoded = encoder.finish().unwrap();
-    std::fs::write(path, encoded).unwrap();
-}
-
-fn load_state_from_path(path: &str, cpu: &mut CPU) -> bool {
-    let Ok(encoded) = std::fs::File::open(path) else {
-        return false;
-    };
-    let decoder = flate2::read::GzDecoder::new(encoded);
-    *cpu = ciborium::from_reader(decoder).unwrap();
-    cpu.mmu.io.joypad.reset();
-    true
+    save_states::save_to_path(
+        cpu,
+        &std::path::PathBuf::from(name).with_extension("state"),
+    )
 }
 
 fn load_state_with_name(name: &str, cpu: &mut CPU) -> bool {
     let path = std::path::PathBuf::from(name).with_extension("state");
-    load_state_from_path(path.to_str().unwrap(), cpu)
+    match save_states::load_from_path(path) {
+        Some(saved_cpu) => {
+            *cpu = saved_cpu;
+            true
+        }
+        None => false,
+    }
 }
 
 #[derive(Parser)]
@@ -86,18 +75,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cli_args = CliArgs::parse();
     let rom = read_rom(&cli_args.rom_path)?;
     let ctx = {
-        let mut cpu = CPU::new();
-        if let Some(ref state) = cli_args.load_state {
-            load_state_from_path(state, &mut cpu);
+        let cpu = if let Some(ref state) = cli_args.load_state {
+            save_states::load_from_path(state).unwrap()
         } else {
+            let mut cpu = CPU::new();
             cpu.mmu.load_bios(BIOS);
             cpu.mmu.load_cart(rom);
-        }
+            cpu
+        };
         Box::leak(Box::new(Mutex::new(RunCtx {
             cpu,
+            saved_state: None,
             debug: cli_args.debug,
             run_state: RunState::Running,
-            exit_requested: false,
+            requests: Default::default(),
             speedup: cli_args.speedup.unwrap_or(1.0),
             last_op_address: None,
             volumes: [80.0, 100.0, 100.0, 100.0, 100.0],
@@ -126,7 +117,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         });
         let compute_thread = s.spawn(|| compute_thread_(ctx));
         gui_thread.join().unwrap();
-        ctx.lock().exit_requested = true;
+        ctx.lock().requests.exit = true;
         compute_thread.join().unwrap();
         audio_thread.join().unwrap();
 
@@ -144,7 +135,7 @@ fn audio_init(ctx: &mut RunCtx, rate: u32, channels: u16) {
 }
 
 fn audio_tick(ctx: &RunCtx) -> audio::Action {
-    if ctx.exit_requested {
+    if ctx.requests.exit {
         return audio::Action::Exit;
     }
     match ctx.run_state {
@@ -173,12 +164,20 @@ enum RunState {
     Running,
 }
 
+#[derive(Debug, Default)]
+struct Requests {
+    exit: bool,
+    load_state: bool,
+    save_state: bool,
+}
+
 struct RunCtx {
     cpu: CPU,
+    saved_state: Option<Box<[u8]>>,
     debug: bool,
     run_state: RunState,
     speedup: f32,
-    exit_requested: bool,
+    requests: Requests,
     last_op_address: Option<u16>,
     volumes: [f32; 5],
 }
@@ -202,9 +201,18 @@ fn compute_thread_(ctx: &Mutex<RunCtx>) {
     let mut last_tick_time;
     loop {
         let mut ctx = ctx.lock();
-        if ctx.exit_requested {
+        if ctx.requests.exit {
             ctx.cpu.mmu.cart().dump_sram();
             break;
+        }
+        if std::mem::take(&mut ctx.requests.save_state) {
+            save_state_with_name(&ctx.cpu.mmu.cart().name(), &ctx.cpu);
+        }
+        if std::mem::take(&mut ctx.requests.load_state) {
+            load_state_with_name(
+                &ctx.cpu.mmu.cart().name(),
+                &mut ctx.cpu,
+            );
         }
         let (ticks_to_advance, ops_to_advance) = match ctx.run_state {
             RunState::Paused => {
@@ -321,10 +329,10 @@ impl<'a> gui::Client for GuiClient<'a> {
                 ctx.run_state = RunState::StepOps(1);
             }
             gui::Event::KeyDown(K::S) => {
-                save_state_with_name(&ctx.cpu.mmu.cart().name(), &ctx.cpu);
+                ctx.requests.save_state = true;
             }
             gui::Event::KeyDown(K::L) => {
-                load_state_with_name(&ctx.cpu.mmu.cart().name(), &mut ctx.cpu);
+                ctx.requests.load_state = true;
             }
             gui::Event::KeyDown(K::Space) => {
                 if ctx.run_state == RunState::Running {
