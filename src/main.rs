@@ -69,6 +69,8 @@ struct CliArgs {
     load_state: Option<String>,
     #[arg(long)]
     speedup: Option<f32>,
+    #[arg(long)]
+    volume: Option<f32>,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -91,7 +93,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             requests: Default::default(),
             speedup: cli_args.speedup.unwrap_or(1.0),
             last_op_address: None,
-            volumes: [80.0, 100.0, 100.0, 100.0, 100.0],
+            volumes: [
+                cli_args.volume.unwrap_or(80.0),
+                100.0,
+                100.0,
+                100.0,
+                100.0,
+            ],
         })))
     };
     std::thread::scope(|s| -> Result<(), Box<dyn Error>> {
