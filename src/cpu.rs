@@ -240,7 +240,7 @@ impl CPU {
             // executing.
             let next_op = self.fetch_and_decode_one_op();
             self.current_op = Some(next_op);
-            self.state = State::ExecutingOp(next_op.clocks as u64);
+            self.state = State::ExecutingOp(next_op.num_clocks as u64);
 
             if self.breakpoints.check_hit(&self.regs.pc) {
                 this_tick.breakpoint_was_hit = true;
@@ -301,7 +301,7 @@ impl CPU {
     }
 
     fn execute_one_op(&mut self, op: &Op) {
-        let status = (op.handler)(self, op.args, op.num_bytes);
+        let status = op.execute(self);
         match status {
             OpStatus::Normal => {
                 self.regs.pc += op.num_bytes as u16;
