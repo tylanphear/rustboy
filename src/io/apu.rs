@@ -107,7 +107,7 @@ impl DAC {
     }
 
     fn digital_to_analog(input: u8) -> f32 {
-        1.0 - 2.0 * (input as f32) * (1.0 / 15.0)
+        1.0 - (2.0 / 15.0) * (input as f32)
     }
 }
 
@@ -675,9 +675,7 @@ impl Registers {
 struct HighPassFilter {
     capacitor: f32,
 }
-const CHARGE_FACTOR: f32 = {
-    0.999958
-};
+const CHARGE_FACTOR: f32 = 0.999958;
 
 impl HighPassFilter {
     fn reset(&mut self) {
