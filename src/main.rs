@@ -207,6 +207,7 @@ fn reset_cpu(cpu: &mut CPU) {
 
 fn compute_thread_(ctx: &Mutex<RunCtx>) {
     let mut last_tick_time;
+    let mut last_save_time = std::time::Instant::now();
     loop {
         let mut ctx = ctx.lock();
         if ctx.requests.exit {
@@ -266,9 +267,16 @@ fn compute_thread_(ctx: &Mutex<RunCtx>) {
                 ctx.run_state = RunState::Paused
             }
             RunState::Running => {
-                let speedup = ctx.speedup;
+                if last_save_time.elapsed() > std::time::Duration::from_secs(5)
+                {
+                    last_save_time = std::time::Instant::now();
+                    let mut saved_state = Vec::new();
+                    save_states::save_to_vec(&ctx.cpu, &mut saved_state);
+                    ctx.saved_state = Some(saved_state.into_boxed_slice());
+                }
                 // Explicitly drop the mutex before sleeping, so we hold the
                 // lock for as little time as possible.
+                let speedup = ctx.speedup;
                 drop(ctx);
                 if speedup > 0.0 {
                     let expected_tick_time =
@@ -361,6 +369,11 @@ impl<'a> gui::Client for GuiClient<'a> {
                 ctx.cpu.mmu.io.joypad.down(joypad::B);
                 ctx.cpu.mmu.io.joypad.down(joypad::START);
                 ctx.cpu.mmu.io.joypad.down(joypad::SELECT);
+            }
+            E::KeyDown(K::Slash) => {
+                if let Some(saved_state) = &ctx.saved_state {
+                    ctx.emu.cpu = save_states::load_from_slice(saved_state);
+                }
             }
             E::KeyDown(K::Equals) => {
                 ctx.volumes[0] =
