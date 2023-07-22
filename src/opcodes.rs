@@ -1480,7 +1480,7 @@ mod tests {
 
     #[test]
     fn add() {
-        let mut cpu = CPU::new();
+        let mut cpu = CPU::default();
         let mut check = |a, b, res, zf, cf, hf| {
             check_alu(&mut cpu, ADD, a, b, 0, res, zf, cf, hf)
         };
@@ -1496,7 +1496,7 @@ mod tests {
 
     #[test]
     fn adc() {
-        let mut cpu = CPU::new();
+        let mut cpu = CPU::default();
         let mut check = |a, b, carryin, res, zf, cf, hf| {
             check_alu(&mut cpu, ADC, a, b, carryin, res, zf, cf, hf)
         };
@@ -1522,7 +1522,7 @@ mod tests {
 
     #[test]
     fn sub() {
-        let mut cpu = CPU::new();
+        let mut cpu = CPU::default();
         let mut check = |a, b, result, zf, cf, hf| {
             check_alu(&mut cpu, SUB, a, b, 0, result, zf, cf, hf)
         };
@@ -1540,7 +1540,7 @@ mod tests {
 
     #[test]
     fn sbc() {
-        let mut cpu = CPU::new();
+        let mut cpu = CPU::default();
         let mut check = |a, b, carryin, result, zf, cf, hf| {
             check_alu(&mut cpu, SBC, a, b, carryin, result, zf, cf, hf)
         };
@@ -1568,7 +1568,7 @@ mod tests {
 
     #[test]
     fn addhl() {
-        let mut cpu = CPU::new();
+        let mut cpu = CPU::default();
         let mut check = |hl, bc, result, carry, halfcarry| {
             writeback16(&mut cpu, HL, hl);
             writeback16(&mut cpu, BC, bc);
@@ -1590,7 +1590,7 @@ mod tests {
 
     #[test]
     fn addsp() {
-        let mut cpu = CPU::new();
+        let mut cpu = CPU::default();
         let mut check = |sp, imm8, result, carry, halfcarry| {
             cpu.regs.pc = 0xD000;
             cpu.mmu.store8(cpu.regs.pc + 1, imm8);
@@ -1613,7 +1613,7 @@ mod tests {
 
     #[test]
     fn daa() {
-        let mut cpu = CPU::new();
+        let mut cpu = CPU::default();
         let mut check = |a, result, flags: u8, zero, carry, halfcarry| {
             cpu.regs.af[1] = a;
             cpu.regs.af[0] = flags << 4;

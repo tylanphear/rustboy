@@ -2,8 +2,8 @@ use std::cell::Cell;
 
 use serde::{Deserialize, Serialize};
 
-use crate::utils::Mem;
 use crate::utils::{self, TClock};
+use crate::utils::{Clock, Mem};
 
 // LCD display is 160x144 pixels
 pub const SCREEN_WIDTH: usize = 160;
@@ -208,7 +208,11 @@ impl LCDController {
         Mode::from(self.read_reg(reg::STAT) & 0b00000011)
     }
 
-    pub fn tick(&mut self, interrupts: &mut crate::cpu::Interrupts) {
+    pub fn tick(
+        &mut self,
+        clock: &Clock,
+        interrupts: &mut crate::cpu::Interrupts,
+    ) {
         let stat_interrupt_on_lyc = utils::bit_set(self.read_reg(reg::STAT), 6);
         let stat_interrupt_on_mode2 =
             utils::bit_set(self.read_reg(reg::STAT), 5);
@@ -217,7 +221,7 @@ impl LCDController {
         let stat_interrupt_on_mode0 =
             utils::bit_set(self.read_reg(reg::STAT), 3);
 
-        let (mut clock, should_tick) = self.clock.tick();
+        let (mut clock, should_tick) = self.clock.tick(clock);
         if !should_tick {
             return;
         }
@@ -787,7 +791,8 @@ impl crate::utils::Dump for LCDController {
         writeln!(
             out,
             "CLOCK1: {0:08}",
-            self.clock.val() % (CLOCKS_PER_SCANLINE * NUM_SCANLINES)
+            self.clock.val()
+                % (CLOCKS_PER_SCANLINE * NUM_SCANLINES)
                 % CLOCKS_PER_SCANLINE
         )?;
         writeln!(
@@ -947,6 +952,7 @@ mod tests {
 
     #[test]
     fn vblank_interrupt_is_triggered() {
+        let mut clock = Clock::default();
         let mut ppu = LCDController::default();
         // First enable LCD power
         ppu.write_reg(reg::LCDC, 0x80);
@@ -955,7 +961,7 @@ mod tests {
         let mut interrupts = crate::cpu::Interrupts::default();
         for _ in 0..144 {
             for _ in 0..(CLOCKS_PER_SCANLINE * 4) {
-                ppu.tick(&mut interrupts);
+                ppu.tick(&clock.tick(), &mut interrupts);
                 assert!(!interrupts.vblank_requested());
             }
         }
@@ -963,10 +969,10 @@ mod tests {
         assert!(!interrupts.vblank_requested());
         assert_eq!(ppu.mode(), Mode::HBlank);
         for _ in 0..4 {
-            ppu.tick(&mut interrupts);
+            ppu.tick(&clock.tick(), &mut interrupts);
         }
         for _ in 0..4 {
-            ppu.tick(&mut interrupts);
+            ppu.tick(&clock.tick(), &mut interrupts);
         }
         assert_eq!(ppu.mode(), Mode::VBlank);
         assert!(interrupts.vblank_requested());

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use crate::mmu::MMU;
 use crate::opcodes::{self, Op, OpStatus};
-use crate::utils::{Regs, TClock};
+use crate::utils::{Clock, Regs, TClock};
 
 /// M clock (mem/io) clock runs at 4Mhz
 pub const M_CLOCK_FREQUENCY: u64 = 4_194_304;
@@ -146,9 +146,9 @@ pub struct CPU {
     pub breakpoints: Breakpoints,
 }
 
-impl CPU {
-    pub fn new() -> CPU {
-        CPU {
+impl Default for CPU {
+    fn default() -> Self {
+        Self {
             clock: Default::default(),
             regs: Regs::default(),
             mmu: MMU::new(),
@@ -159,7 +159,9 @@ impl CPU {
             breakpoints: Default::default(),
         }
     }
+}
 
+impl CPU {
     pub fn current_op(&self) -> Option<&'static Op> {
         self.current_op
     }
@@ -168,7 +170,7 @@ impl CPU {
         matches!(self.state, State::ExecutingOp(_))
     }
 
-    pub fn tick(&mut self) -> Tick {
+    pub fn tick(&mut self, clock: &Clock) -> Tick {
         // Start this tick at the current PC -- this may change if an interrupt
         // gets dispatched.
         let mut this_tick = Tick::default();
@@ -177,9 +179,9 @@ impl CPU {
         // Tick devices (MMU/LCD/Timer) and check for interrupts that need to
         // be flagged in IF. Do this *before* we possibly dispatch an interrupt
         // this tick.
-        self.tick_devices_and_check_interrupts();
+        self.tick_devices_and_check_interrupts(clock);
 
-        let (_, should_tick) = self.clock.tick();
+        let (_, should_tick) = self.clock.tick(clock);
         if !should_tick {
             return this_tick;
         }
@@ -250,9 +252,9 @@ impl CPU {
         this_tick
     }
 
-    fn tick_devices_and_check_interrupts(&mut self) {
-        self.mmu.tick();
-        let interrupts = self.mmu.io.tick();
+    fn tick_devices_and_check_interrupts(&mut self, clock: &Clock) {
+        self.mmu.tick(clock);
+        let interrupts = self.mmu.io.tick(clock);
         if interrupts.any_requested() {
             self.mmu.store8_unchecked(
                 IF,

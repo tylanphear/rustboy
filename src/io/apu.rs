@@ -1,7 +1,7 @@
-use crate::utils::Clock;
 use crate::utils::FallingEdgeDetector;
 use crate::utils::Mem;
 use crate::utils::TClock;
+use crate::utils::{Clock, Divider};
 use serde::{Deserialize, Serialize};
 
 // If n = sample_rate,
@@ -328,21 +328,27 @@ impl<const SWEEP: bool> SquareCircuit<SWEEP> {
         }
     }
 
-    fn tick(&mut self, regs: &mut Registers, clock: &FrameSequencer) -> f32 {
+    fn tick(
+        &mut self,
+        regs: &mut Registers,
+        clock: &Clock,
+        sequencer: &FrameSequencer,
+    ) -> f32 {
         let period = self.period as u64;
 
         if SWEEP {
-            self.sweep.tick(clock, &mut self.enabled, &mut self.period);
+            self.sweep
+                .tick(sequencer, &mut self.enabled, &mut self.period);
         }
-        self.length_unit.tick(clock, &mut self.enabled);
-        self.envelope.tick(clock);
+        self.length_unit.tick(sequencer, &mut self.enabled);
+        self.envelope.tick(sequencer);
 
         self.duty_timer = self.duty_timer.wrapping_add(1);
         if period == 0 {
             return 0.0;
         }
 
-        let (_, should_clock) = self.period_clock.tick();
+        let (_, should_clock) = self.period_clock.tick(clock);
         if should_clock {
             self.period_timer += 1;
             if self.period_timer == 0x800 {
@@ -372,13 +378,6 @@ impl<const SWEEP: bool> crate::utils::Dump for SquareCircuit<SWEEP> {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct PeriodDivider<const RATE: u64> {
-    counter: u64,
-    period: u16,
-    period_counter: u16,
-}
-
 const WAVE_CHANNEL_RATE: u64 = crate::cpu::M_CLOCK_FREQUENCY / 2;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -394,7 +393,7 @@ pub struct WaveCircuit {
 
     period: u16,
     period_timer: u16,
-    period_clock: Clock<{WAVE_CHANNEL_RATE}>,
+    period_clock: Divider<{ WAVE_CHANNEL_RATE }>,
 
     pattern: [u8; CHANNEL_3_TABLE_SIZE],
 }
@@ -447,7 +446,12 @@ impl WaveCircuit {
         }
     }
 
-    fn tick(&mut self, regs: &Registers, clock: &FrameSequencer) -> f32 {
+    fn tick(
+        &mut self,
+        regs: &Registers,
+        clock: &Clock,
+        sequencer: &FrameSequencer,
+    ) -> f32 {
         let period = self.period as usize;
         if period == 0 {
             return 0.0;
@@ -456,7 +460,7 @@ impl WaveCircuit {
         // Waveform is emitted from buffer
         let waveform = self.sample_buffer;
 
-        let (_, should_tick) = self.period_clock.tick();
+        let (_, should_tick) = self.period_clock.tick(clock);
         if should_tick {
             self.period_timer += 1;
             if self.period_timer == 0x800 {
@@ -483,7 +487,7 @@ impl WaveCircuit {
             0b11 => 2,
             _ => unreachable!(),
         };
-        self.length_unit.tick(clock, &mut self.enabled);
+        self.length_unit.tick(sequencer, &mut self.enabled);
 
         let dac_enabled = regs.channel_dac_enabled(3);
         self.dac.convert(
@@ -552,7 +556,7 @@ impl NoiseCircuit {
         }
     }
 
-    fn tick(&mut self, regs: &Registers, clock: &FrameSequencer) -> f32 {
+    fn tick(&mut self, regs: &Registers, sequencer: &FrameSequencer) -> f32 {
         // LFSR frequency is (M / 16) / (R * 2^S) where
         //    M = main clock frequency
         //    R = divider code (where 0 => 1/2)
@@ -563,13 +567,13 @@ impl NoiseCircuit {
             r => BASE_FREQUENCY / ((1 << self.shift) * (r as u64)),
         };
 
-        if clock.cycles % (MAIN_CLOCK_FREQUENCY / frequency) == 0 {
+        if sequencer.cycles % (MAIN_CLOCK_FREQUENCY / frequency) == 0 {
             self.lfsr.tick();
         }
         let waveform = self.lfsr.output() * self.envelope.volume;
 
-        self.length_unit.tick(clock, &mut self.enabled);
-        self.envelope.tick(clock);
+        self.length_unit.tick(sequencer, &mut self.enabled);
+        self.envelope.tick(sequencer);
 
         let dac_enabled = regs.channel_dac_enabled(4);
         self.dac.convert(dac_enabled, self.enabled, waveform)
@@ -769,7 +773,7 @@ impl APU {
         crate::utils::bit_set(self.regs.read(reg::NR52), 7)
     }
 
-    pub fn tick(&mut self, new_div: u8) {
+    pub fn tick(&mut self, clock: &Clock, new_div: u8) {
         if self.sample_rate == 0 {
             self.sequencer.tick(new_div);
             return;
@@ -791,12 +795,21 @@ impl APU {
             )
         };
 
-        let (channel_1_left, channel_1_right) =
-            panned(4, 0, self.channel1.tick(&mut self.regs, &self.sequencer));
-        let (channel_2_left, channel_2_right) =
-            panned(5, 1, self.channel2.tick(&mut self.regs, &self.sequencer));
-        let (channel_3_left, channel_3_right) =
-            panned(6, 2, self.channel3.tick(&self.regs, &self.sequencer));
+        let (channel_1_left, channel_1_right) = panned(
+            4,
+            0,
+            self.channel1.tick(&mut self.regs, clock, &self.sequencer),
+        );
+        let (channel_2_left, channel_2_right) = panned(
+            5,
+            1,
+            self.channel2.tick(&mut self.regs, clock, &self.sequencer),
+        );
+        let (channel_3_left, channel_3_right) = panned(
+            6,
+            2,
+            self.channel3.tick(&self.regs, clock, &self.sequencer),
+        );
         let (channel_4_left, channel_4_right) =
             panned(7, 3, self.channel4.tick(&self.regs, &self.sequencer));
 
@@ -1063,19 +1076,23 @@ mod tests {
         use crate::io::timer::regs::DIV;
         const TICKS_FOR_512_HZ: u64 = crate::cpu::T_CLOCK_FREQUENCY / 512;
 
+        let mut clock = Clock::default();
         let mut timer = crate::io::Timer::default();
-        let mut clock = FrameSequencer::default();
+        let mut seq = FrameSequencer::default();
         for n in 0..100 {
             for tick in 0..TICKS_FOR_512_HZ {
-                assert_eq!(clock.div_apu_counter, n);
+                assert_eq!(seq.div_apu_counter, n);
                 if tick != 0 {
-                    assert_ne!(clock.cycles % TICKS_FOR_512_HZ, 0);
+                    assert_ne!(seq.cycles % TICKS_FOR_512_HZ, 0);
                 }
-                timer.tick(&mut crate::cpu::Interrupts::default());
-                clock.tick(timer.load(DIV));
+                timer.tick(
+                    &clock.tick(),
+                    &mut crate::cpu::Interrupts::default(),
+                );
+                seq.tick(timer.load(DIV));
             }
-            assert_eq!(clock.div_apu_counter, n + 1);
-            assert_eq!(clock.cycles % TICKS_FOR_512_HZ, 0);
+            assert_eq!(seq.div_apu_counter, n + 1);
+            assert_eq!(seq.cycles % TICKS_FOR_512_HZ, 0);
         }
     }
 }

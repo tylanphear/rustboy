@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::utils::MClock;
+use crate::utils::{Clock, MClock};
 
 pub mod regs {
     pub const DIV: u16 = 0xFF04;
@@ -15,7 +15,6 @@ pub const DIV_CLOCK_PERIOD: u64 =
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Timer {
-    clock: MClock,
     div: u8,
     tima: u8,
     tma: u8,
@@ -27,18 +26,17 @@ impl Timer {
         *self = Default::default();
     }
 
-    pub fn tick(&mut self, interrupts: &mut crate::cpu::Interrupts) {
-        let (clock, should_tick) = self.clock.tick();
-        if !should_tick {
-            return;
-        }
-
+    pub fn tick(
+        &mut self,
+        clock: &Clock,
+        interrupts: &mut crate::cpu::Interrupts,
+    ) {
         // The main clock ticks at 4Mhz. This means a tick occurs every
         // 1/2^22 seconds. The DIV clock is expected to tick every 16384 Hz.
         // This means a tick every 1/16384 seconds. This means we need to tick one
         // DIV clock every 2^22/16384 == 64 main clock ticks.
 
-        if clock % DIV_CLOCK_PERIOD == 0 {
+        if clock.val() % DIV_CLOCK_PERIOD == 0 {
             self.div = self.div.wrapping_add(1);
         }
 
@@ -46,7 +44,7 @@ impl Timer {
             return;
         }
 
-        if clock % self.clock_rate() == 0 {
+        if clock.val() % self.clock_rate() == 0 {
             let (new_tima, overflowed) = self.tima.overflowing_add(1);
             if overflowed {
                 interrupts.request_timer();
@@ -102,12 +100,7 @@ impl crate::utils::Dump for Timer {
         writeln!(out, "TMA :  {:02X} ({:04X})", self.tma, regs::TMA)?;
         writeln!(out, "TAC : {:03b} ({:04X})", self.tac, regs::TAC)?;
         writeln!(out)?;
-        writeln!(
-            out,
-            "CLOCK: {:04X} (rate: {})",
-            self.clock.val(),
-            self.clock_rate()
-        )?;
+        writeln!(out, "CLOCK (rate: {})", self.clock_rate())?;
         Ok(())
     }
 }
@@ -121,9 +114,10 @@ mod tests {
         const TICKS_FOR_16384_HZ: u64 = crate::cpu::T_CLOCK_FREQUENCY / 16384;
 
         let mut timer = Timer::default();
+        let mut clock = Clock::default();
         for _ in 0..TICKS_FOR_16384_HZ {
             assert_eq!(timer.div, 0);
-            timer.tick(&mut crate::cpu::Interrupts::default());
+            timer.tick(&clock.tick(), &mut crate::cpu::Interrupts::default());
         }
         assert_eq!(timer.div, 1);
     }

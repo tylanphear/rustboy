@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cart::Cartridge;
 use crate::io::IOController;
-use crate::utils::{Mem, TClock};
+use crate::utils::{Clock, Mem, TClock};
 use crate::{cpu, io::ppu};
 
 mod regs {
@@ -97,8 +97,8 @@ impl MMU {
         self.watchpoints.clear();
     }
 
-    pub fn tick(&mut self) {
-        let (_, should_tick) = self.oam_timer.tick();
+    pub fn tick(&mut self, clock: &Clock) {
+        let (_, should_tick) = self.oam_timer.tick(clock);
         if self.oam_clocks_left == 0 || !should_tick {
             return;
         }

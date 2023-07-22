@@ -8,6 +8,8 @@ use ppu::LCDController;
 use serde::{Deserialize, Serialize};
 use timer::Timer;
 
+use crate::utils::Clock;
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct IOController {
     pub lcd: LCDController,
@@ -23,14 +25,14 @@ impl IOController {
         self.apu.reset();
     }
 
-    pub fn tick(&mut self) -> crate::cpu::Interrupts {
+    pub fn tick(&mut self, clock: &Clock) -> crate::cpu::Interrupts {
         use timer::regs::DIV;
 
         let mut interrupts = crate::cpu::Interrupts::default();
-        self.lcd.tick(&mut interrupts);
-        self.timer.tick(&mut interrupts);
+        self.lcd.tick(clock, &mut interrupts);
+        self.timer.tick(clock, &mut interrupts);
         self.joypad.tick(&mut interrupts);
-        self.apu.tick(self.timer.load(DIV));
+        self.apu.tick(clock, self.timer.load(DIV));
         interrupts
     }
 

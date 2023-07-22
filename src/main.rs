@@ -17,6 +17,7 @@
 /// T-Cycle | 4.19MHz   | 4 cycles
 use parking_lot::Mutex;
 use std::{error::Error, ops::ControlFlow};
+use emulator::Emu;
 
 const TICK_DURATION: std::time::Duration = std::time::Duration::from_nanos(
     1_000_000_000 / crate::cpu::M_CLOCK_FREQUENCY,
@@ -30,6 +31,7 @@ mod cart;
 mod cpu;
 mod debug;
 mod disassembler;
+mod emulator;
 mod gui;
 mod io;
 mod mmu;
@@ -80,13 +82,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         let cpu = if let Some(ref state) = cli_args.load_state {
             save_states::load_from_path(state).unwrap()
         } else {
-            let mut cpu = CPU::new();
+            let mut cpu = CPU::default();
             cpu.mmu.load_bios(BIOS);
             cpu.mmu.load_cart(rom);
             cpu
         };
         Box::leak(Box::new(Mutex::new(RunCtx {
-            cpu,
+            emu: Emu::new(cpu),
             saved_state: None,
             debug: cli_args.debug,
             run_state: RunState::Running,
@@ -139,7 +141,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn audio_init(ctx: &mut RunCtx, rate: u32, channels: u16) {
-    ctx.cpu.mmu.io.apu.init(rate as usize, channels as usize);
+    ctx.emu
+        .cpu
+        .mmu
+        .io
+        .apu
+        .init(rate as usize, channels as usize);
 }
 
 fn audio_tick(ctx: &RunCtx) -> audio::Action {
@@ -153,7 +160,7 @@ fn audio_tick(ctx: &RunCtx) -> audio::Action {
 }
 
 fn audio_callback(ctx: &mut RunCtx, data: &mut [f32]) {
-    ctx.cpu.mmu.io.apu.render(data, &ctx.volumes);
+    ctx.emu.cpu.mmu.io.apu.render(data, &ctx.volumes);
 }
 
 fn read_rom(path: &str) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -180,7 +187,7 @@ struct Requests {
 }
 
 struct RunCtx {
-    cpu: CPU,
+    emu: Emu,
     saved_state: Option<Box<[u8]>>,
     debug: bool,
     run_state: RunState,
@@ -211,16 +218,16 @@ fn compute_thread_(ctx: &Mutex<RunCtx>) {
     loop {
         let mut ctx = ctx.lock();
         if ctx.requests.exit {
-            ctx.cpu.mmu.cart().dump_sram();
+            ctx.emu.cart().unwrap().dump_sram();
             break;
         }
         if std::mem::take(&mut ctx.requests.save_state) {
-            save_state_with_name(&ctx.cpu.mmu.cart().name(), &ctx.cpu);
+            save_state_with_name(&ctx.emu.cart().unwrap().name(), &ctx.emu.cpu);
         }
         if std::mem::take(&mut ctx.requests.load_state) {
             load_state_with_name(
-                &ctx.cpu.mmu.cart().name(),
-                &mut ctx.cpu,
+                &ctx.emu.cart().unwrap().name(),
+                &mut ctx.emu.cpu,
             );
         }
         let (ticks_to_advance, ops_to_advance) = match ctx.run_state {
@@ -238,7 +245,7 @@ fn compute_thread_(ctx: &Mutex<RunCtx>) {
         let mut ticks = 0;
         let mut ops = 0;
         loop {
-            if ctx.cpu.stopped()
+            if ctx.emu.cpu.stopped()
                 || ticks >= ticks_to_advance
                 || ops >= ops_to_advance
             {
@@ -246,15 +253,18 @@ fn compute_thread_(ctx: &Mutex<RunCtx>) {
             }
             ticks += 1;
             if ctx.debug && debug::break_::check_and_reset() {
-                crate::debug_log!("Hit breakpoint '{0:04X?}'", ctx.cpu.regs.pc);
+                crate::debug_log!(
+                    "Hit breakpoint '{0:04X?}'",
+                    ctx.emu.cpu.regs.pc
+                );
                 ctx.run_state = RunState::Paused;
                 break;
             }
-            let this_cycle: Tick = ctx.cpu.tick();
+            let this_cycle: Tick = ctx.emu.tick();
             if ctx.debug && this_cycle.breakpoint_was_hit {
                 ctx.run_state = RunState::Paused;
                 crate::debug_log!("Hit breakpoint '{0:04X?}'", this_cycle.pc);
-                ctx.cpu.breakpoints.reset_count(this_cycle.pc);
+                ctx.emu.cpu.breakpoints.reset_count(this_cycle.pc);
                 break;
             }
             if this_cycle.op_was_retired {
@@ -271,7 +281,7 @@ fn compute_thread_(ctx: &Mutex<RunCtx>) {
                 {
                     last_save_time = std::time::Instant::now();
                     let mut saved_state = Vec::new();
-                    save_states::save_to_vec(&ctx.cpu, &mut saved_state);
+                    save_states::save_to_vec(&ctx.emu.cpu, &mut saved_state);
                     ctx.saved_state = Some(saved_state.into_boxed_slice());
                 }
                 // Explicitly drop the mutex before sleeping, so we hold the
@@ -336,7 +346,7 @@ impl<'a> gui::Client for GuiClient<'a> {
                 ctx.debug = !ctx.debug;
             }
             E::KeyDown(K::R) => {
-                reset_cpu(&mut ctx.cpu);
+                reset_cpu(&mut ctx.emu.cpu);
                 debug::log::reset();
             }
             E::KeyDown(K::T) => {
@@ -359,16 +369,16 @@ impl<'a> gui::Client for GuiClient<'a> {
                 }
             }
             E::KeyUp(K::Num3) => {
-                ctx.cpu.mmu.io.joypad.up(joypad::A);
-                ctx.cpu.mmu.io.joypad.up(joypad::B);
-                ctx.cpu.mmu.io.joypad.up(joypad::START);
-                ctx.cpu.mmu.io.joypad.up(joypad::SELECT);
+                ctx.emu.joypad().up(joypad::A);
+                ctx.emu.joypad().up(joypad::B);
+                ctx.emu.joypad().up(joypad::START);
+                ctx.emu.joypad().up(joypad::SELECT);
             }
             E::KeyDown(K::Num3) => {
-                ctx.cpu.mmu.io.joypad.down(joypad::A);
-                ctx.cpu.mmu.io.joypad.down(joypad::B);
-                ctx.cpu.mmu.io.joypad.down(joypad::START);
-                ctx.cpu.mmu.io.joypad.down(joypad::SELECT);
+                ctx.emu.joypad().down(joypad::A);
+                ctx.emu.joypad().down(joypad::B);
+                ctx.emu.joypad().down(joypad::START);
+                ctx.emu.joypad().down(joypad::SELECT);
             }
             E::KeyDown(K::Slash) => {
                 if let Some(saved_state) = &ctx.saved_state {
@@ -384,12 +394,12 @@ impl<'a> gui::Client for GuiClient<'a> {
             }
             E::KeyUp(key) => {
                 if let Some(code) = sdl_key_to_joypad_code(&key) {
-                    ctx.cpu.mmu.io.joypad.up(code);
+                    ctx.emu.joypad().up(code);
                 }
             }
             E::KeyDown(key) => {
                 if let Some(code) = sdl_key_to_joypad_code(&key) {
-                    ctx.cpu.mmu.io.joypad.down(code);
+                    ctx.emu.joypad().down(code);
                 }
             }
             E::Unknown(..) => {}
@@ -451,7 +461,7 @@ impl<'a> gui::Client for GuiClient<'a> {
                         "TICK RATE: {}",
                         TICKS_TO_ADVANCE_PER_RUN_STEP
                     ));
-                    ui.text_wrapped(dump!(ctx.cpu.mmu.io.lcd));
+                    ui.text_wrapped(dump!(ctx.emu.lcd()));
                 })
                 .unwrap();
             const JOYPAD_POS: [f32; 2] = [LCD_POS[X] + LCD_SIZE[X], LCD_POS[Y]];
@@ -461,7 +471,7 @@ impl<'a> gui::Client for GuiClient<'a> {
                 .position(JOYPAD_POS, imgui::Condition::FirstUseEver)
                 .movable(false)
                 .build(|| {
-                    ui.text_wrapped(dump!(ctx.cpu.mmu.io.joypad));
+                    ui.text_wrapped(dump!(ctx.emu.joypad()));
                 })
                 .unwrap();
             const VOLUME_POS: [f32; 2] =
@@ -486,7 +496,7 @@ impl<'a> gui::Client for GuiClient<'a> {
                 .position(REGS_POS, imgui::Condition::FirstUseEver)
                 .movable(false)
                 .build(|| {
-                    ui.text_wrapped(dump!(ctx.cpu));
+                    ui.text_wrapped(dump!(ctx.emu.cpu));
                 })
                 .unwrap();
             const CONTROLS_POS: [f32; 2] =
@@ -504,12 +514,12 @@ impl<'a> gui::Client for GuiClient<'a> {
                         .build();
                     if bp_changed {
                         if let Some(addr) = parse_addr(&scratch) {
-                            ctx.cpu.breakpoints.register(addr);
+                            ctx.emu.cpu.breakpoints.register(addr);
                         }
                     }
                     scratch.clear();
                     ui.input_float("speedup", &mut ctx.speedup).build();
-                    let breaks = ctx.cpu.breakpoints.dump();
+                    let breaks = ctx.emu.cpu.breakpoints.dump();
                     if !breaks.is_empty() {
                         ui.text(breaks);
                     }
@@ -519,11 +529,11 @@ impl<'a> gui::Client for GuiClient<'a> {
                         .build();
                     if wp_changed {
                         if let Some(addr) = parse_addr(&scratch) {
-                            ctx.cpu.mmu.register_watchpoint(addr);
+                            ctx.emu.cpu.mmu.register_watchpoint(addr);
                         }
                     }
                     scratch.clear();
-                    ctx.cpu.mmu.dump_watchpoints(&mut scratch).unwrap();
+                    ctx.emu.cpu.mmu.dump_watchpoints(&mut scratch).unwrap();
                     if !scratch.is_empty() {
                         ui.text_wrapped(scratch);
                     }
@@ -536,7 +546,7 @@ impl<'a> gui::Client for GuiClient<'a> {
                 .size(CART_SIZE, imgui::Condition::FirstUseEver)
                 .position(CART_POS, imgui::Condition::FirstUseEver)
                 .build(|| {
-                    if let Some(ref cart) = ctx.cpu.mmu.cartridge {
+                    if let Some(ref cart) = ctx.emu.cart() {
                         ui.text_wrapped(dump!(cart));
                     }
                 })
@@ -548,7 +558,7 @@ impl<'a> gui::Client for GuiClient<'a> {
                 .position(TIMER_POS, imgui::Condition::FirstUseEver)
                 .movable(false)
                 .build(|| {
-                    ui.text_wrapped(dump!(ctx.cpu.mmu.io.timer));
+                    ui.text_wrapped(dump!(ctx.emu.cpu.mmu.io.timer));
                 })
                 .unwrap();
             const DISASM_POS: [f32; 2] =
@@ -559,7 +569,7 @@ impl<'a> gui::Client for GuiClient<'a> {
                 .position(DISASM_POS, imgui::Condition::FirstUseEver)
                 .movable(false)
                 .build(|| {
-                    let current_pc = ctx.cpu.regs.pc;
+                    let current_pc = ctx.emu.cpu.regs.pc;
                     let last_pc =
                         if let Some(last_op_address) = ctx.last_op_address {
                             if current_pc > last_op_address
@@ -572,7 +582,7 @@ impl<'a> gui::Client for GuiClient<'a> {
                         } else {
                             current_pc
                         };
-                    let bytes = ctx.cpu.mmu.block_load(last_pc, usize::MAX);
+                    let bytes = ctx.emu.cpu.mmu.block_load(last_pc, usize::MAX);
                     let insts: Vec<_> = disassembler::InstIter::new(bytes)
                         .map_while(|it| {
                             (it.offset <= current_pc as usize
@@ -605,7 +615,7 @@ impl<'a> gui::Client for GuiClient<'a> {
                 .position(APU_POS, imgui::Condition::FirstUseEver)
                 .movable(false)
                 .build(|| {
-                    ui.text_wrapped(dump!(ctx.cpu.mmu.io.apu));
+                    ui.text_wrapped(dump!(ctx.emu.cpu.mmu.io.apu));
                 })
                 .unwrap();
             const LOG_POS: [f32; 2] = [CART_POS[X] + CART_SIZE[X], CART_POS[Y]];
@@ -675,6 +685,6 @@ impl<'a> gui::Client for GuiClient<'a> {
         screen: &mut gui::ScreenBuffer,
     ) -> crate::io::ppu::RenderUpdate {
         let ctx = self.ctx.lock();
-        ctx.cpu.mmu.io.lcd.render(screen)
+        ctx.emu.lcd().render(screen)
     }
 }

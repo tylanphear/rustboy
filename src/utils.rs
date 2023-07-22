@@ -4,7 +4,7 @@ mod mem;
 mod timer;
 
 pub use mem::Mem;
-pub use timer::{Clock, MClock, TClock};
+pub use timer::{Clock, Divider, MClock, TClock};
 
 pub mod constants {
     pub const EIGHT_K: usize = 0x2000;
