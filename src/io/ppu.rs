@@ -2,7 +2,7 @@ use std::cell::Cell;
 
 use serde::{Deserialize, Serialize};
 
-use crate::utils::{self, TClock};
+use crate::utils::{self, MClock};
 use crate::utils::{Clock, Mem};
 
 // LCD display is 160x144 pixels
@@ -109,18 +109,18 @@ impl From<u8> for Mode {
 // starts in mode 2, and mode 3 is variable-length depending on how long it
 // takes to draw sprites in OAM.
 //
-// Each scanline lasts 456 clocks (114 internal)
-//    4 clocks ( 1 internal) - (Mode 0)
-//   80 clocks (20 internal) - (Mode 2)
-//  364 clocks (91 internal) - (Mode 3)
-//    8 clocks ( 2 internal) - (Mode 0)
+// Each scanline lasts 456 clocks
+//    4 clocks - (Mode 0)
+//   80 clocks - (Mode 2)
+//  364 clocks - (Mode 3)
+//    8 clocks - (Mode 0)
 //
 // On lines 144-153, LCD is in Mode 1 (VBlank):
 //   - Lasts for 4560 clocks
 //   - VBlank interrupt is triggered by setting IF flag on cycle after LY=144
 
-const CLOCKS_PER_SCANLINE: u64 = 114;
-const LAST_CLOCK_IN_SCANLINE: u64 = CLOCKS_PER_SCANLINE - 1;
+const CLOCKS_PER_SCANLINE: u64 = 456;
+const LAST_CLOCK_IN_SCANLINE: u64 = CLOCKS_PER_SCANLINE - 4;
 const NUM_SCANLINES: u64 = 154;
 const LAST_SCANLINE: u64 = NUM_SCANLINES - 1;
 const VRAM_START: u16 = 0x8000;
@@ -169,7 +169,7 @@ impl RenderUpdate {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct LCDController {
     screen: ScreenBuffer,
-    clock: TClock,
+    clock: MClock,
     registers: [u8; 0xFF4C - 0xFF40],
     pub(crate) vram: Vram,
     pub(crate) oam: Oam,
@@ -235,8 +235,8 @@ impl LCDController {
             // Not in VBlank
             0..=143 => match clock {
                 0 => self.set_mode(Mode::OamSearch),
-                20 => self.set_mode(Mode::PixelTransfer),
-                63 => {
+                80 => self.set_mode(Mode::PixelTransfer),
+                252 => {
                     self.update_screen(line as usize);
                     self.set_mode(Mode::HBlank);
                 }
@@ -245,7 +245,7 @@ impl LCDController {
             },
             // VBlank is about to begin
             144 => match clock {
-                1 => {
+                4 => {
                     // VBlank begins -- signal interrupt
                     self.set_mode(Mode::VBlank);
                     interrupts.request_vblank();
@@ -257,7 +257,7 @@ impl LCDController {
                 self.write_reg(reg::LY, ly + 1);
             }
             // Last VBlank line
-            LAST_SCANLINE if clock == 1 => {
+            LAST_SCANLINE if clock == 4 => {
                 self.write_reg(reg::LY, 0);
             }
             _ => {}
@@ -272,7 +272,7 @@ impl LCDController {
 
         let old_stat_signal = self.stat_signal;
         self.stat_signal =
-            (ly_equals_lyc && stat_interrupt_on_lyc && clock == 1)
+            (ly_equals_lyc && stat_interrupt_on_lyc && clock == 4)
                 || (self.mode() as u8 == 0 && stat_interrupt_on_mode0)
                 || (self.mode() as u8 == 1 && stat_interrupt_on_mode1)
                 || (self.mode() as u8 == 2 && stat_interrupt_on_mode2);
