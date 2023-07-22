@@ -319,59 +319,60 @@ impl<'a> gui::Client for GuiClient<'a> {
             })
         }
 
+        use gui::Event as E;
         match event {
-            gui::Event::Exit | gui::Event::KeyDown(K::Q) => {
+            E::Exit | gui::Event::KeyDown(K::Q) => {
                 return ControlFlow::Break(());
             }
-            gui::Event::KeyDown(K::Tab) => {
+            E::KeyDown(K::Tab) => {
                 ctx.debug = !ctx.debug;
             }
-            gui::Event::KeyDown(K::R) => {
+            E::KeyDown(K::R) => {
                 reset_cpu(&mut ctx.cpu);
                 debug::log::reset();
             }
-            gui::Event::KeyDown(K::T) => {
+            E::KeyDown(K::T) => {
                 ctx.run_state = RunState::StepTicks(1);
             }
-            gui::Event::KeyDown(K::N) => {
+            E::KeyDown(K::N) => {
                 ctx.run_state = RunState::StepOps(1);
             }
-            gui::Event::KeyDown(K::S) => {
+            E::KeyDown(K::S) => {
                 ctx.requests.save_state = true;
             }
-            gui::Event::KeyDown(K::L) => {
+            E::KeyDown(K::L) => {
                 ctx.requests.load_state = true;
             }
-            gui::Event::KeyDown(K::Space) => {
+            E::KeyDown(K::Space) => {
                 if ctx.run_state == RunState::Running {
                     ctx.run_state = RunState::Paused;
                 } else {
                     ctx.run_state = RunState::Running;
                 }
             }
-            gui::Event::KeyUp(K::Num3) => {
+            E::KeyUp(K::Num3) => {
                 ctx.cpu.mmu.io.joypad.up(joypad::A);
                 ctx.cpu.mmu.io.joypad.up(joypad::B);
                 ctx.cpu.mmu.io.joypad.up(joypad::START);
                 ctx.cpu.mmu.io.joypad.up(joypad::SELECT);
             }
-            gui::Event::KeyDown(K::Num3) => {
+            E::KeyDown(K::Num3) => {
                 ctx.cpu.mmu.io.joypad.down(joypad::A);
                 ctx.cpu.mmu.io.joypad.down(joypad::B);
                 ctx.cpu.mmu.io.joypad.down(joypad::START);
                 ctx.cpu.mmu.io.joypad.down(joypad::SELECT);
             }
-            gui::Event::KeyUp(key) => {
+            E::KeyUp(key) => {
                 if let Some(code) = sdl_key_to_joypad_code(&key) {
                     ctx.cpu.mmu.io.joypad.up(code);
                 }
             }
-            gui::Event::KeyDown(key) => {
+            E::KeyDown(key) => {
                 if let Some(code) = sdl_key_to_joypad_code(&key) {
                     ctx.cpu.mmu.io.joypad.down(code);
                 }
             }
-            gui::Event::Unknown(..) => {}
+            E::Unknown(..) => {}
         };
         ControlFlow::Continue(())
     }
