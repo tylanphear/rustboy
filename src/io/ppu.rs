@@ -330,7 +330,6 @@ impl LCDController {
     pub fn load(&self, address: u16) -> u8 {
         match address {
             reg::DMA => panic!("should be handled by MMU!"),
-            reg::LY if !self.lcd_display_enabled() => 0x00,
             0xFF40..=0xFF4B => self.read_reg(address),
             VRAM_START..=VRAM_END if self.vram_is_inaccessible() => 0xFF,
             VRAM_START..=VRAM_END => self.vram[address - VRAM_START],
